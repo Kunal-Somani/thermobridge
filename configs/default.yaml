@@ -22,6 +22,7 @@ data:
   # Pelvis centers: A(120), C(60) = 180 (no center B)
 
   split:
+    scheme: patient_level
     seed: 42 # Deterministic patient-level split (Rule 3)
     # Fractions must sum to 1.0
     train: 0.7
@@ -53,12 +54,15 @@ preprocessing:
 # Patch pipeline (§5.4 of spec)
 # ---------------------------------------------------------------------------
 patch:
+  samples_per_volume: 8
   # TODO: pin after GPU VRAM profiling (spec says 96³ or 128³)
-  size: null # e.g., [96, 96, 96]
+  size: [96, 96, 96] # e.g., [96, 96, 96]
   # Overlap fraction for sliding-window inference
   inference_overlap: 0.5
   # Foreground sampling: fraction of patches that must contain foreground
   foreground_fraction: 0.8
+  # Foreground bias: if true, prioritize foreground voxels during sampling
+  foreground_bias: true
 
 # ---------------------------------------------------------------------------
 # Model
