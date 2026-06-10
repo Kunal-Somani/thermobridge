@@ -2,10 +2,10 @@
 .venv/
 
 # Data (read-only, not tracked)
-data/
+/data/
 
 # Outputs (generated at runtime)
-outputs/
+/outputs/
 
 # Python
 __pycache__/
