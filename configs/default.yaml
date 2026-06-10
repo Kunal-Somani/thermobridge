@@ -1,0 +1,166 @@
+# =============================================================================
+# ThermoBridge — Default Configuration
+# =============================================================================
+# Every hyperparameter, loss term, and normalization constant lives here.
+# Rule 1 (PAPER==CODE): nothing hidden or undocumented.
+# Rule 8 (Ask before inventing): EDA-dependent values are null with TODO.
+
+project:
+  name: "ThermoBridge"
+  version: "0.1.0"
+
+seed: 42  # Global seed for reproducibility (Rule 6)
+
+# ---------------------------------------------------------------------------
+# Data
+# ---------------------------------------------------------------------------
+data:
+  root_dir: "data/synthrad2023/Task1"
+  anatomies: ["brain", "pelvis"]
+  # Patient ID format: 1[B|P][A|B|C][NNN]
+  # Brain centers: A(60), B(60), C(60) = 180
+  # Pelvis centers: A(120), C(60) = 180 (no center B)
+
+  split:
+    seed: 42  # Deterministic patient-level split (Rule 3)
+    # Fractions must sum to 1.0
+    train: 0.7
+    val: 0.15
+    test: 0.15
+    # Stratify by (anatomy, center) to ensure balanced representation
+    stratify_by: ["anatomy", "center"]
+
+# ---------------------------------------------------------------------------
+# Preprocessing
+# ---------------------------------------------------------------------------
+preprocessing:
+  # TODO: pin after EDA — requires inspecting actual voxel spacings across centers
+  target_spacing_mm: null  # e.g., [1.0, 1.0, 1.0]
+
+  ct:
+    # TODO: pin after EDA — requires inspecting HU histograms across anatomies
+    clip_hu_min: null  # e.g., -1024
+    clip_hu_max: null  # e.g., 3000
+    # Normalization strategy for CT (applied after clipping)
+    # Must store min/max or mean/std to invert exactly (Rule 2)
+    normalization: "min_max"  # options: min_max, z_score
+
+  mr:
+    # TODO: pin after EDA — MR intensities are arbitrary; need per-volume strategy
+    normalization: null  # e.g., "percentile_99" or "z_score"
+
+# ---------------------------------------------------------------------------
+# Patch pipeline (§5.4 of spec)
+# ---------------------------------------------------------------------------
+patch:
+  # TODO: pin after GPU VRAM profiling (spec says 96³ or 128³)
+  size: null  # e.g., [96, 96, 96]
+  # Overlap fraction for sliding-window inference
+  inference_overlap: 0.5
+  # Foreground sampling: fraction of patches that must contain foreground
+  foreground_fraction: 0.8
+
+# ---------------------------------------------------------------------------
+# Model
+# ---------------------------------------------------------------------------
+model:
+  # --- Brownian Bridge (§5.1) ---
+  bridge:
+    # Number of diffusion steps
+    num_steps: 1000  # T in the spec
+    # Max variance hyperparameter: δ_t = 2·s·(m_t - m_t²)
+    max_variance_s: 1.0
+    # Prediction target for the denoiser
+    prediction_target: "noise"  # options: noise, x0, velocity (§16 open decision)
+
+  # --- Hybrid Transformer Denoiser (§5.2) ---
+  denoiser:
+    # 3D patch embedding
+    patch_embed_size: 4  # spatial tokens = (patch_size / embed_size)³
+    # Transformer dimensions
+    hidden_dim: 384
+    num_layers: 8
+    num_heads: 6
+    mlp_ratio: 4.0
+    dropout: 0.0
+    # Timestep conditioning: adaLN (DiT-style)
+    time_conditioning: "adaln"
+    # Direction conditioning: learned embedding
+    num_directions: 2  # MR→CT=0, CT→MR=1
+
+  # --- Learnable 3D Anisotropic Diffusion Operator (§5.3) ---
+  anisotropic_op:
+    # Number of explicit Euler steps inside the residual block
+    num_steps: 3
+    # Initial conductance K (learnable; Perona-Malik edge-stopping)
+    init_conductance_k: 10.0
+    # Step size for Euler integration (learnable)
+    init_step_size: 0.1
+    # Whether K is per-channel
+    per_channel_k: true
+
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
+training:
+  batch_size: 1  # 3D volumes are large; adjust after VRAM profiling
+  num_workers: 4
+  epochs: 200
+  optimizer:
+    name: "adamw"
+    lr: 1.0e-4
+    weight_decay: 1.0e-2
+    betas: [0.9, 0.999]
+  scheduler:
+    name: "cosine"
+    warmup_epochs: 10
+    min_lr: 1.0e-6
+  mixed_precision: true  # FP16 with FP32-safe handling for gradient ops
+  gradient_clip_norm: 1.0
+  # Directions trained per batch (both for bidirectional)
+  directions: ["mr_to_ct", "ct_to_mr"]
+
+# ---------------------------------------------------------------------------
+# Loss
+# ---------------------------------------------------------------------------
+loss:
+  # Primary loss for the bridge denoiser
+  primary: "mse"  # on the prediction target (noise/x0/velocity)
+  # All loss terms and weights documented here (Rule 1: no hidden terms)
+  weights:
+    primary: 1.0
+
+# ---------------------------------------------------------------------------
+# Evaluation (§9)
+# ---------------------------------------------------------------------------
+evaluation:
+  # All metrics computed INSIDE patient mask only (Rule 2)
+  mask_only: true
+  metrics: ["mae_hu", "psnr", "ssim"]
+  # CT predictions inverse-normalized to HU before MAE (Rule 2)
+  inverse_normalize_ct: true
+  # Report mean ± std across cases + significance test (Rule 4)
+  significance_test: "wilcoxon"
+  # Per-organ breakdown in every table
+  per_organ: true
+
+# ---------------------------------------------------------------------------
+# Output paths (all under outputs/, gitignored)
+# ---------------------------------------------------------------------------
+output:
+  root_dir: "outputs"
+  figures_dir: "outputs/figures"
+  reports_dir: "outputs/reports"
+  checkpoints_dir: "outputs/checkpoints"
+  # Resolved config dumped with every run (Rule 6)
+  log_resolved_config: true
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging:
+  level: "INFO"
+  # Options: csv, tensorboard, wandb
+  backend: "csv"
+  # Figure DPI for publication (spec: ≥300)
+  figure_dpi: 300

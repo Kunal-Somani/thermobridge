@@ -1,0 +1,23 @@
+[project]
+name = "thermobridge"
+version = "0.1.0"
+description = "Bidirectional 3D MRI↔CT synthesis via Brownian-bridge diffusion"
+requires-python = ">=3.10"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "A", "SIM"]
+ignore = ["E501"]  # line length handled by formatter
+
+[tool.ruff.format]
+line-ending = "auto"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+# Block ROS2 system-level pytest plugins that contaminate the venv
+addopts = "-p no:launch_testing -p no:launch_ros"

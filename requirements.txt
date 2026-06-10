@@ -1,0 +1,25 @@
+# =============================================================================
+# ThermoBridge — Dependencies
+# =============================================================================
+# Phase-0: Setup, EDA, preprocessing
+SimpleITK>=2.3
+numpy>=1.24
+pandas>=2.0
+matplotlib>=3.7
+tqdm>=4.65
+PyYAML>=6.0
+omegaconf>=2.3
+pytest>=7.4
+ruff>=0.4
+
+# ---------------------------------------------------------------------------
+# Phase-1+: ML / training (uncomment when ready)
+# ---------------------------------------------------------------------------
+# torch>=2.1
+# pytorch-lightning>=2.1
+# monai>=1.3
+# nibabel>=5.1
+# scipy>=1.11
+# einops>=0.7
+# ptflops>=0.7
+# wandb>=0.16

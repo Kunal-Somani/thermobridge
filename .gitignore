@@ -1,0 +1,37 @@
+# Virtual environment
+.venv/
+
+# Data (read-only, not tracked)
+data/
+
+# Outputs (generated at runtime)
+outputs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Testing
+.pytest_cache/
+
+# Tooling
+.ruff_cache/
+.mypy_cache/
+
+# Logging / experiment tracking
+wandb/
+*.ckpt
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
