@@ -221,9 +221,10 @@ def sliding_window_predict(
     Z, Y, X = source_norm.shape
     pZ, pY, pX = patch_size
 
-    # If volume smaller than patch on any axis, fall back to direct prediction
-    if Z < pZ or Y < pY or X < pX:
-        return predictor.predict(source_norm, direction_id)
+    # Never run a whole (possibly large) volume through the net at once — that
+    # path can OOM the 8 GB GPU and crash the shared display session. Clamp the
+    # ROI to the volume size and always sliding-window it instead.
+    roi_size = [min(p, s) for p, s in zip(patch_size, (Z, Y, X))]
 
     # MONAI sliding_window_inference expects (B, C, Z, Y, X)
     src_t = torch.from_numpy(source_norm[np.newaxis, np.newaxis]).float()
@@ -236,7 +237,7 @@ def sliding_window_predict(
     with torch.no_grad():
         result = sliding_window_inference(
             inputs       = src_t,
-            roi_size     = list(patch_size),
+            roi_size     = roi_size,
             sw_batch_size= 1,
             predictor    = _predictor_fn,
             overlap      = overlap,

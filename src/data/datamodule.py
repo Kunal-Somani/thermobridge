@@ -79,11 +79,13 @@ class ThermoBridgeDataModule(pl.LightningDataModule):
         cfg: Any,
         splits_path:   Path | None = None,
         manifest_path: Path | None = None,
+        overfit_n:     int | None = None,
     ) -> None:
         super().__init__()
         self.cfg = cfg
         self.splits_path   = splits_path   or (_REPO_ROOT / "outputs" / "splits.json")
         self.manifest_path = manifest_path or (_REPO_ROOT / "outputs" / "preprocessed" / "manifest.json")
+        self.overfit_n     = overfit_n     # if set, restrict train+val to N patients
 
         self.train_ds: ThermoBridgeTrainDataset | None = None
         self.val_ds:   ThermoBridgeEvalDataset  | None = None
@@ -105,8 +107,18 @@ class ThermoBridgeDataModule(pl.LightningDataModule):
         base_seed          = int(self.cfg.seed)
 
         if stage in ("fit", None):
+            train_ids = splits["train"]
+            val_ids   = splits["val"]
+            if self.overfit_n is not None:
+                # Restrict to N patients (2 brain + 2 pelvis where possible)
+                brain_ids  = [p for p in train_ids if manifest[p]["anatomy"] == "brain"]
+                pelvis_ids = [p for p in train_ids if manifest[p]["anatomy"] == "pelvis"]
+                n_each     = max(1, self.overfit_n // 2)
+                train_ids  = brain_ids[:n_each] + pelvis_ids[:n_each]
+                val_ids    = train_ids  # deliberately overfit: val == train
+
             self.train_ds = ThermoBridgeTrainDataset(
-                patient_ids        = splits["train"],
+                patient_ids        = train_ids,
                 manifest           = manifest,
                 patch_size         = patch_size,
                 samples_per_volume = samples_per_volume,
@@ -114,7 +126,7 @@ class ThermoBridgeDataModule(pl.LightningDataModule):
                 base_seed          = base_seed,
             )
             self.val_ds = ThermoBridgeEvalDataset(
-                patient_ids = splits["val"],
+                patient_ids = val_ids,
                 manifest    = manifest,
             )
 
@@ -130,28 +142,30 @@ class ThermoBridgeDataModule(pl.LightningDataModule):
 
     def train_dataloader(self) -> DataLoader:
         assert self.train_ds is not None, "Call setup('fit') first."
+        nw = int(self.cfg.training.num_workers)
         return DataLoader(
             self.train_ds,
             batch_size  = int(self.cfg.training.batch_size),
             shuffle     = True,
-            num_workers = int(self.cfg.training.num_workers),
-            pin_memory  = True,
-            drop_last   = True,          # keep batch sizes uniform for bridge
-            worker_init_fn = seed_worker,
+            num_workers = nw,
+            pin_memory  = (nw > 0),
+            drop_last   = True,
+            worker_init_fn = seed_worker if nw > 0 else None,
             generator   = _make_generator(int(self.cfg.seed)),
-            persistent_workers = (int(self.cfg.training.num_workers) > 0),
+            persistent_workers = (nw > 0),
         )
 
     def val_dataloader(self) -> DataLoader:
         assert self.val_ds is not None, "Call setup('fit') first."
+        nw = int(self.cfg.training.num_workers)
         return DataLoader(
             self.val_ds,
-            batch_size  = 1,             # variable volume shapes — must be 1
-            shuffle     = False,         # deterministic ordering (R6)
-            num_workers = int(self.cfg.training.num_workers),
-            pin_memory  = True,
-            worker_init_fn = seed_worker,
-            persistent_workers = (int(self.cfg.training.num_workers) > 0),
+            batch_size  = 1,
+            shuffle     = False,
+            num_workers = nw,
+            pin_memory  = (nw > 0),
+            worker_init_fn = seed_worker if nw > 0 else None,
+            persistent_workers = (nw > 0),
         )
 
     def test_dataloader(self) -> DataLoader:

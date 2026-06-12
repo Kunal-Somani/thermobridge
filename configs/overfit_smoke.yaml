@@ -1,0 +1,123 @@
+# =============================================================================
+# ThermoBridge — OVERFIT SMOKE CONFIG
+# =============================================================================
+# PURPOSE: Verify gradient wiring on 4 patients, ~50 steps.
+# Tiny config that must show train/loss_total → ~0 quickly.
+# NOT for real training — only for sanity-checking the pipeline.
+# =============================================================================
+
+project:
+  name: "ThermoBridge-overfit-smoke"
+  version: "0.1.0"
+
+seed: 42
+
+# ---------------------------------------------------------------------------
+# Data — point at same preprocessed cache; split replaced below
+# ---------------------------------------------------------------------------
+data:
+  root_dir: "data/synthrad2023/Task1"
+  anatomies: ["brain", "pelvis"]
+
+  split:
+    scheme: patient_level
+    seed: 42
+    train: 0.7
+    val: 0.15
+    test: 0.15
+    stratify_by: ["anatomy", "center"]
+
+# ---------------------------------------------------------------------------
+# Preprocessing — same as default (already processed)
+# ---------------------------------------------------------------------------
+preprocessing:
+  target_spacing_mm: [1.0, 1.0, 1.5]
+  ct:
+    clip_hu_min: -1024
+    clip_hu_max: 2000
+    normalization: "min_max"
+  mr:
+    normalization: percentile_99
+
+# ---------------------------------------------------------------------------
+# Patch — tiny to keep GPU memory low for the smoke test
+# ---------------------------------------------------------------------------
+patch:
+  samples_per_volume: 4   # fewer patches per patient
+  size: [64, 64, 64]      # small patches for fast iteration
+  inference_overlap: 0.5
+  foreground_fraction: 0.8
+  foreground_bias: true
+
+# ---------------------------------------------------------------------------
+# Training — overfit: large LR, tiny batch, few epochs, 4 patients
+# ---------------------------------------------------------------------------
+training:
+  model: unet3d
+  unet_channels: [16, 32, 64, 128]   # smaller model for faster steps
+  losses: { l1: 1.0, ssim: 0.0 }
+  batch_size: 2
+  num_workers: 0                     # 0 workers for debugging
+  max_epochs: 30                     # ~50–100 steps total on 4 patients
+  ckpt_monitor: val/mae_hu
+  ckpt_mode: min
+  optimizer:
+    name: "adamw"
+    lr: 5.0e-4                       # high LR to force overfitting
+    weight_decay: 0.0                # no regularisation → easier to overfit
+    betas: [0.9, 0.999]
+  scheduler:
+    name: "cosine"
+    warmup_epochs: 2
+    min_lr: 1.0e-6
+  mixed_precision: false             # fp32 for gradient debugging
+  gradient_clip_norm: 10.0
+  directions: ["mr_to_ct", "ct_to_mr"]
+
+# ---------------------------------------------------------------------------
+# Model (transformer spec unchanged — not used by U-Net baseline)
+# ---------------------------------------------------------------------------
+model:
+  bridge:
+    num_steps: 1000
+    max_variance_s: 1.0
+    prediction_target: "noise"
+  denoiser:
+    patch_embed_size: 4
+    hidden_dim: 384
+    num_layers: 8
+    num_heads: 6
+    mlp_ratio: 4.0
+    dropout: 0.0
+    time_conditioning: "adaln"
+    num_directions: 2
+  anisotropic_op:
+    num_steps: 3
+    init_conductance_k: 10.0
+    init_step_size: 0.1
+    per_channel_k: true
+
+# ---------------------------------------------------------------------------
+# Evaluation
+# ---------------------------------------------------------------------------
+evaluation:
+  mask_only: true
+  metrics: ["mae_hu", "psnr", "ssim"]
+  inverse_normalize_ct: true
+  significance_test: "wilcoxon"
+  per_organ: true
+
+# ---------------------------------------------------------------------------
+# Output / Logging
+# ---------------------------------------------------------------------------
+output:
+  root_dir: "outputs"
+  figures_dir: "outputs/figures"
+  reports_dir: "outputs/reports"
+  checkpoints_dir: "outputs/checkpoints_smoke"
+  log_resolved_config: true
+
+logging:
+  level: "INFO"
+  backend: "csv"
+  figure_dpi: 300
