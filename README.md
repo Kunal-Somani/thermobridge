@@ -1,7 +1,6 @@
 # ThermoBridge
 
-**Bidirectional 3D MRI↔CT synthesis for radiotherapy synthetic CT generation.**
-A thermodynamically grounded Brownian-bridge diffusion process that transports
+**Bidirectional 3D MRI↔CT synthesis for radiotherapy synthetic CT generation.** A thermodynamically grounded Brownian-bridge diffusion process that transports
 directly between paired MRI and CT volumes in both directions, using a hybrid
 transformer denoiser whose local mixer is a novel learnable 3D anisotropic-diffusion
 operator (edge-preserving by construction). Evaluated cross-organ on brain and pelvis
