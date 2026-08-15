@@ -162,7 +162,7 @@ training:
   losses: { l1: 1.0, ssim: 0.0 }
   batch_size: 2 # 3D volumes are large; adjust after VRAM profiling
   num_workers: 4
-  max_epochs: 50
+  max_epochs: 100
   ckpt_monitor: val/mae_hu
   ckpt_mode: min
   optimizer:
