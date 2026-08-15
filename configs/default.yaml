@@ -31,6 +31,32 @@ data:
     # Stratify by (anatomy, center) to ensure balanced representation
     stratify_by: ["anatomy", "center"]
 
+  # SynthRAD2025 — multi-modality, multi-anatomy (ADR-012)
+  synthrad2025:
+    task1_dir: "data/synthrad2025/Task1"   # MRI-CT: HN, TH, AB — 890 pairs
+    task2_dir: "data/synthrad2025/Task2"   # CBCT-CT: HN, TH, AB — 1472 pairs
+    anatomies: ["HN", "TH", "AB"]
+    modalities: ["mr", "ct", "cbct"]
+    # Use challenge pre-split (65/10/25) — do not re-split (G3)
+    use_challenge_split: true
+    cbct:
+      clip_hu_min: null   # TODO: pin from EDA (Chunk N1)
+      clip_hu_max: null   # TODO: pin from EDA (Chunk N1)
+      normalization: "min_max"
+    hn_ct:
+      clip_hu_min: null   # TODO: pin from EDA — may differ from brain [-1024,2000]
+      clip_hu_max: null
+    th_ct:
+      clip_hu_min: null   # TODO: pin from EDA
+      clip_hu_max: null
+    ab_ct:
+      clip_hu_min: null   # TODO: pin from EDA
+      clip_hu_max: null
+
+  # Combined anatomy list (SynthRAD2023 + SynthRAD2025)
+  all_anatomies: ["brain", "pelvis", "HN", "TH", "AB"]
+  all_modalities: ["mr", "ct", "cbct"]
+
 # ---------------------------------------------------------------------------
 # Preprocessing
 # ---------------------------------------------------------------------------
@@ -68,29 +94,27 @@ patch:
 # Model
 # ---------------------------------------------------------------------------
 model:
-  # --- Brownian Bridge (§5.1) ---
+  # --- Image-to-Image Schrödinger Bridge / I2SB (§3, ADR-013) ---
   bridge:
     # Number of diffusion steps
     num_steps: 1000 # T in the spec
     # Max variance hyperparameter: δ_t = 2·s·(m_t - m_t²)
     max_variance_s: 1.0
     # Prediction target for the denoiser
-    prediction_target: "noise" # options: noise, x0, velocity (§16 open decision)
+    prediction_target: "x0"   # I2SB uses x0-parameterization; noise pred not used
 
-  # --- Hybrid Transformer Denoiser (§5.2) ---
+  # --- Hybrid Transformer Denoiser (§4) ---
   denoiser:
-    # 3D patch embedding
-    patch_embed_size: 4 # spatial tokens = (patch_size / embed_size)³
+    # 3D patchify conv stride/kernel size
+    # patch_size to be re-pinned after VRAM profiling on cloud GPU
+    patch_size: [8, 8, 8]
     # Transformer dimensions
-    hidden_dim: 384
-    num_layers: 8
-    num_heads: 6
-    mlp_ratio: 4.0
-    dropout: 0.0
-    # Timestep conditioning: adaLN (DiT-style)
-    time_conditioning: "adaln"
-    # Direction conditioning: learned embedding
-    num_directions: 2 # MR→CT=0, CT→MR=1
+    hidden_dim: 256
+    num_layers: 6
+    num_heads: 8
+    # Modality-pair conditioning (§4.1)
+    num_modalities: 3
+    modality_embed_dim: 64
 
   # --- Learnable 3D Anisotropic Diffusion Operator (§5.3) ---
   anisotropic_op:
@@ -107,6 +131,10 @@ model:
 # Training
 # ---------------------------------------------------------------------------
 training:
+  # Dual-direction batching (ADR-014): each pair generates forward + backward sample
+  dual_direction_batching: true
+  # Effective samples per volume = 2x when dual_direction_batching=true
+  # Re-profile VRAM after transformer denoiser is built; adjust batch_size accordingly
   model: unet3d
   unet_channels: [32, 64, 128, 256]
   losses: { l1: 1.0, ssim: 0.0 }
