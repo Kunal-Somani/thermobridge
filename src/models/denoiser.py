@@ -18,6 +18,7 @@ rest of the model.
 
 from __future__ import annotations
 
+import copy
 import math
 
 import torch
@@ -168,10 +169,15 @@ class ThermoBridgeDenoiser(nn.Module):
         # stay Identity() and the routing gate is never evaluated.
         self.router: AnatomyRouter | None = None
 
-    def set_local_mixer(self, mixers: list[nn.Module]) -> None:
-        """Replace the local mixer slots (§6, anisotropic operator — Chunk 9b)."""
-        assert len(mixers) == self.num_layers
-        self.local_mixers = nn.ModuleList(mixers)
+    def set_local_mixer(self, op: nn.Module) -> None:
+        """Replace the Identity() local mixer slots (§6, Chunk 9b).
+
+        `op` (e.g. an AnisotropicDiffusionOp or ConvLocalMixer, both operating
+        on (B, hidden_dim, D', H', W') spatial volumes) is deep-copied once
+        per denoiser block, so every block gets its own independently
+        trainable instance rather than sharing parameters.
+        """
+        self.local_mixers = nn.ModuleList([copy.deepcopy(op) for _ in range(self.num_layers)])
 
     def set_adapters(self, router: AnatomyRouter, adapter_blocks: nn.ModuleList) -> None:
         """Replace the Identity() adapter slots with routed anatomy adapters (§5, Chunk 9).
@@ -229,7 +235,14 @@ class ThermoBridgeDenoiser(nn.Module):
             self.blocks, self.local_mixers, self.anatomy_adapters
         ):
             x = block(x, c)
-            x = local_mixer(x)
+
+            # Local mixer operates on 3D spatial volumes (§6), not token
+            # sequences — reshape tokens <-> spatial around the call. A
+            # no-op for Identity() (reshape then inverse-reshape).
+            x_spatial = x.transpose(1, 2).reshape(B, C, Dp, Hp, Wp)
+            x_spatial = local_mixer(x_spatial)
+            x = x_spatial.flatten(2).transpose(1, 2)
+
             if isinstance(anatomy_adapter, RoutedAdapterBlock):
                 x = anatomy_adapter(x, alpha)
             else:
