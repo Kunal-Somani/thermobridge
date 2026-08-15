@@ -96,12 +96,14 @@ patch:
 model:
   # --- Image-to-Image Schrödinger Bridge / I2SB (§3, ADR-013) ---
   bridge:
-    # Number of diffusion steps
-    num_steps: 1000 # T in the spec
-    # Max variance hyperparameter: δ_t = 2·s·(m_t - m_t²)
+    # Max variance hyperparameter: sigma_t^2 = 2*s*t_bar*(1-t_bar) (open value — sweep later)
     max_variance_s: 1.0
+    # Reverse-sampling steps at inference (open value — sweep {10, 25, 50})
+    num_steps: 25
+    # Time-weighting schedule for L_bridge (open value — sweep constant/snr/cosine)
+    time_weighting: "constant"
     # Prediction target for the denoiser
-    prediction_target: "x0"   # I2SB uses x0-parameterization; noise pred not used
+    prediction_target: "x0"   # I2SB uses x0-parameterization (ADR-013); noise pred not used
 
   # --- Hybrid Transformer Denoiser (§4) ---
   denoiser:
@@ -163,9 +165,20 @@ training:
 loss:
   # Primary loss for the bridge denoiser
   primary: "mse" # on the prediction target (noise/x0/velocity)
-  # All loss terms and weights documented here (Rule 1: no hidden terms)
+  # All loss terms and weights documented here (Rule 1: no hidden terms).
+  # §7: L_total = λ_rec·L_rec + λ_bnd·L_bnd + λ_rad·L_rad + λ_ent·L_ent + λ_bal·L_bal + λ_cls·L_cls
+  # rec is implemented (Chunk 7, I2SB bridge). bnd/rad require the anisotropic
+  # operator (§6, Chunk 9b) / Radon projector (not yet built); ent/bal require
+  # the routing gate (§5, Chunk 9); cls is optional (ADR-003). Their weights
+  # are read from config now so nothing is hidden later, but LitBridge logs
+  # them as zero contribution until those components exist.
   weights:
-    primary: 1.0
+    rec: 1.0    # λ_rec
+    bnd: 0.1    # λ_bnd — placeholder, sweep later
+    rad: 0.1    # λ_rad — placeholder, sweep later
+    ent: 0.01   # λ_ent
+    bal: 0.01   # λ_bal
+    cls: 0.0    # λ_cls — off by default (ADR-003)
 
 # ---------------------------------------------------------------------------
 # Evaluation (§9)
