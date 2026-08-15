@@ -92,7 +92,7 @@ preprocessing:
 patch:
   samples_per_volume: 8
   # TODO: pin after GPU VRAM profiling (spec says 96³ or 128³)
-  size: [96, 96, 96] # e.g., [96, 96, 96]
+  size: [128, 128, 128] 
   # Overlap fraction for sliding-window inference
   inference_overlap: 0.5
   # Foreground sampling: fraction of patches that must contain foreground
