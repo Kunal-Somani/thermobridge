@@ -118,6 +118,15 @@ model:
     num_modalities: 3
     modality_embed_dim: 64
 
+  # --- N-way Sparse Anatomy Routing Gate (§5, CORE CONTRIBUTION A, ADR-003) ---
+  routing:
+    num_anatomies: 2   # will be 5 after SynthRAD2025 integrated (data.all_anatomies)
+    top_k: 2            # k in {1,2}; default 2
+    adapter_rank: 64    # low-rank bottleneck dim for per-anatomy adapters
+    tau_max: 2.0         # temperature annealing (§5): soft simplex early
+    tau_min: 0.5         # near one-hot late
+    # total_epochs: read from training.max_epochs at runtime
+
   # --- Learnable 3D Anisotropic Diffusion Operator (§5.3) ---
   anisotropic_op:
     # Number of explicit Euler steps inside the residual block
