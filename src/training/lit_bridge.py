@@ -4,12 +4,17 @@ Loss terms (§7)
 ----------------
 L_total = λ_rec·L_rec + λ_bnd·L_bnd + λ_rad·L_rad + λ_ent·L_ent + λ_bal·L_bal + λ_cls·L_cls
 
-Only L_rec (the I2SB bridge reconstruction loss, §3) is implemented here. The
-remaining terms need components built in later chunks — L_bnd/L_rad need the
-anisotropic operator (§6, Chunk 9b) and Radon projector; L_ent/L_bal need the
-anatomy routing gate (§5, Chunk 9); L_cls is optional (ADR-003). Their λ
-weights are read from cfg.loss.weights and logged every step at their actual
-(zero) contribution — nothing is hidden (Rule 1), they simply have no
+L_rec (§3, I2SB bridge reconstruction) and L_rad (§7, ADR-011, Radon-domain
+consistency — Chunk 10) are implemented. L_rad is computed only for samples
+whose target modality is CT or CBCT (m_t index 1 or 2); MRI-target samples
+contribute exactly 0 via RadonConsistencyLoss's mask, matching the spec's
+"Applied when: Target is CT or CBCT only". L_bnd needs the anisotropic
+operator's edge information wired into a boundary loss (not yet built);
+L_ent/L_bal need the routing gate's outputs threaded through RoutingLoss
+(the gate itself exists since Chunk 9, but its losses aren't wired here
+yet); L_cls is optional (ADR-003) and needs anatomy labels. Their λ weights
+are read from cfg.loss.weights and logged every step at their actual (zero)
+contribution — nothing is hidden (Rule 1), they simply have no
 implementation yet.
 
 Dual-direction batching (ADR-014)
@@ -61,6 +66,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from src.models.bridge import I2SBProcess
 from src.models.build import build_denoiser
+from src.physics.radon import FastRadonProjector, RadonConsistencyLoss
 from src.training.evaluate import sliding_window_predict
 from src.training.metrics import compute_all_metrics
 from src.data.preprocess import invert_ct_to_hu, invert_mr
@@ -69,6 +75,7 @@ from src.data.preprocess import invert_ct_to_hu, invert_mr
 # and direction_id convention (0 = MR->CT, 1 = CT->MR) used by the dataset.
 _MR_IDX = 0
 _CT_IDX = 1
+_CBCT_IDX = 2  # not yet produced by the dataset (Task2/CBCT not wired), but L_rad must honor it
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +141,7 @@ class LitBridge(pl.LightningModule):
             num_steps=int(cfg.model.bridge.num_steps),
             time_weighting=str(cfg.model.bridge.time_weighting),
         )
+        self.radon_loss = RadonConsistencyLoss(FastRadonProjector())
 
         # §7 loss weights (R1 — from config, explicit, never hardcoded)
         weights = dict(cfg.loss.weights)
@@ -205,12 +213,24 @@ class LitBridge(pl.LightningModule):
         t = torch.rand(B, device=x_0.device)
         alpha = self._make_alpha(B, x_0.device)
 
-        loss_rec = self.bridge.bridge_loss(self.denoiser, x_0, x_T, t, m_s, m_t, alpha)
+        # Sample x_t and predict x_hat_0 directly (rather than calling the
+        # opaque I2SBProcess.bridge_loss) so x_hat_0 is available for L_rad
+        # below without a second denoiser forward pass. This replicates
+        # bridge_loss's own math exactly (see src/models/bridge.py).
+        x_t, _noise = self.bridge.forward_marginal(x_0, x_T, t)
+        x_hat_0 = self.denoiser(x_t, t, m_s, m_t, alpha)
+        w_t = self.bridge.time_weighting(t)
+        l1_per_sample = (x_hat_0 - x_0).abs().flatten(1).mean(dim=1)
+        loss_rec = (w_t * l1_per_sample).mean()
+
+        # L_rad (§7, ADR-011, Chunk 10): only for CT/CBCT targets.
+        is_ct_or_cbct = ((m_t == _CT_IDX) | (m_t == _CBCT_IDX)).float()
+        loss_rad = self.radon_loss(x_hat_0, x_0, is_ct_or_cbct)
 
         # Terms not yet implementable (§7 — see module docstring): logged at
         # their true zero contribution, weights still read from config.
         zero = torch.zeros((), device=x_0.device)
-        loss_bnd, loss_rad, loss_ent, loss_bal, loss_cls = zero, zero, zero, zero, zero
+        loss_bnd, loss_ent, loss_bal, loss_cls = zero, zero, zero, zero
 
         loss_total = (
             self.w_rec * loss_rec
