@@ -130,7 +130,7 @@ model:
 
   # --- N-way Sparse Anatomy Routing Gate (§5, CORE CONTRIBUTION A, ADR-003) ---
   routing:
-    num_anatomies: 2   # will be 5 after SynthRAD2025 integrated (data.all_anatomies)
+    num_anatomies: 5  # brain, pelvis, HN, TH, AB (ADR-010)
     top_k: 2            # k in {1,2}; default 2
     adapter_rank: 64    # low-rank bottleneck dim for per-anatomy adapters
     tau_max: 2.0         # temperature annealing (§5): soft simplex early
