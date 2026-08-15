@@ -23,6 +23,8 @@ import math
 import torch
 import torch.nn as nn
 
+from .routing import AnatomyRouter, RoutedAdapterBlock
+
 
 # ---------------------------------------------------------------------------
 # Conditioning
@@ -162,16 +164,25 @@ class ThermoBridgeDenoiser(nn.Module):
         # Chunk 9 (anatomy-routed adapters, §5) via set_local_mixer/set_adapters.
         self.local_mixers = nn.ModuleList([nn.Identity() for _ in range(num_layers)])
         self.anatomy_adapters = nn.ModuleList([nn.Identity() for _ in range(num_layers)])
+        # Set by set_adapters() (§5, Chunk 9). While None, anatomy_adapters
+        # stay Identity() and the routing gate is never evaluated.
+        self.router: AnatomyRouter | None = None
 
     def set_local_mixer(self, mixers: list[nn.Module]) -> None:
         """Replace the local mixer slots (§6, anisotropic operator — Chunk 9b)."""
         assert len(mixers) == self.num_layers
         self.local_mixers = nn.ModuleList(mixers)
 
-    def set_adapters(self, adapters: list[nn.Module]) -> None:
-        """Replace the anatomy adapter slots (§5, routed adapters — Chunk 9)."""
-        assert len(adapters) == self.num_layers
-        self.anatomy_adapters = nn.ModuleList(adapters)
+    def set_adapters(self, router: AnatomyRouter, adapter_blocks: nn.ModuleList) -> None:
+        """Replace the Identity() adapter slots with routed anatomy adapters (§5, Chunk 9).
+
+        After this call, forward() computes alpha from x_T via `router` at
+        the start of each forward pass (the `alpha` argument to forward() is
+        then ignored, exactly as it was ignored before this call).
+        """
+        assert len(adapter_blocks) == self.num_layers
+        self.router = router
+        self.anatomy_adapters = nn.ModuleList(adapter_blocks)
 
     def forward(
         self,
@@ -187,12 +198,19 @@ class ThermoBridgeDenoiser(nn.Module):
             t:   (B,) float timestep in [0, 1]
             m_s: (B,) int source modality index
             m_t: (B,) int target modality index
-            alpha: (B, A) float routing weights (pass-through; used from Chunk 9)
+            alpha: (B, A) float routing weights. Ignored once set_adapters()
+                has installed a router — alpha is then computed from x_T
+                internally (§5). Kept in the signature for interface
+                stability with callers built before Chunk 9 (e.g. the I2SB
+                bridge process, which always passes some alpha tensor).
 
         Returns:
             x_hat_0: (B, 1, D, H, W) predicted target volume
         """
-        del alpha  # routing not implemented until Chunk 9; accepted for interface stability
+        if self.router is not None:
+            alpha, _S = self.router(x_T)
+        else:
+            del alpha  # no router installed yet; Identity() adapters ignore it anyway
 
         B, _, D, H, W = x_T.shape
         tokens = self.patchify(x_T)  # (B, hidden_dim, D', H', W')
@@ -212,7 +230,10 @@ class ThermoBridgeDenoiser(nn.Module):
         ):
             x = block(x, c)
             x = local_mixer(x)
-            x = anatomy_adapter(x)
+            if isinstance(anatomy_adapter, RoutedAdapterBlock):
+                x = anatomy_adapter(x, alpha)
+            else:
+                x = anatomy_adapter(x)
 
         x = x.transpose(1, 2).reshape(B, C, Dp, Hp, Wp)
         x_hat_0 = self.unpatchify(x)
