@@ -33,18 +33,22 @@ data:
 
   # SynthRAD2025 — multi-modality, multi-anatomy (ADR-012)
   synthrad2025:
-    task1_dir: "data/synthrad2025/Task1"   # MRI-CT: HN, TH, AB — 890 pairs
-    task2_dir: "data/synthrad2025/Task2"   # CBCT-CT: HN, TH, AB — 1472 pairs
+    task1_dir: "data/synthrad2025/Task1_data"   # MRI-CT: HN, TH, AB — 890 pairs
+    task2_dir: "data/synthrad2025/Task2_data"   # CBCT-CT: HN, TH, AB — 1472 pairs
     anatomies: ["HN", "TH", "AB"]
     modalities: ["mr", "ct", "cbct"]
     # Use challenge pre-split (65/10/25) — do not re-split (G3)
     use_challenge_split: true
+    # Per-dataset (SynthRAD2025-only) index maps. The AUTHORITATIVE combined
+    # mapping used by CombinedDataModule/the routing gate is data.combined below.
+    anatomy_to_idx: { HN: 0, TH: 1, AB: 2 }
+    modality_to_idx: { mr: 0, ct: 1, cbct: 2 }
     cbct:
-      clip_hu_min: null   # TODO: pin from EDA (Chunk N1)
+      clip_hu_min: null   # TODO: pin from EDA (Chunk N1); fallback [-1000, 3071] until pinned
       clip_hu_max: null   # TODO: pin from EDA (Chunk N1)
       normalization: "min_max"
     hn_ct:
-      clip_hu_min: null   # TODO: pin from EDA — may differ from brain [-1024,2000]
+      clip_hu_min: null   # TODO: pin from EDA — may differ from brain [-1024,2000]; fallback [-1024,2000]
       clip_hu_max: null
     th_ct:
       clip_hu_min: null   # TODO: pin from EDA
@@ -56,6 +60,12 @@ data:
   # Combined anatomy list (SynthRAD2023 + SynthRAD2025)
   all_anatomies: ["brain", "pelvis", "HN", "TH", "AB"]
   all_modalities: ["mr", "ct", "cbct"]
+
+  # Authoritative combined index mapping (Chunk N1) — used by
+  # CombinedDataModule and (after wiring) the routing gate's num_anatomies=5.
+  combined:
+    anatomy_to_idx: { brain: 0, pelvis: 1, HN: 2, TH: 3, AB: 4 }
+    modality_to_idx: { MRI: 0, CT: 1, CBCT: 2 }
 
 # ---------------------------------------------------------------------------
 # Preprocessing
