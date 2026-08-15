@@ -127,16 +127,17 @@ model:
     tau_min: 0.5         # near one-hot late
     # total_epochs: read from training.max_epochs at runtime
 
-  # --- Learnable 3D Anisotropic Diffusion Operator (§5.3) ---
+  # --- Learnable 3D Anisotropic Diffusion Operator — local mixer (§6, ADR-004) ---
   anisotropic_op:
+    use_anisotropic_op: true  # false = use ConvLocalMixer (ablation B1)
     # Number of explicit Euler steps inside the residual block
     num_steps: 3
-    # Initial conductance K (learnable; Perona-Malik edge-stopping)
-    init_conductance_k: 10.0
-    # Step size for Euler integration (learnable)
-    init_step_size: 0.1
     # Whether K is per-channel
     per_channel_k: true
+    # Initial conductance K (learnable; Perona-Malik edge-stopping)
+    init_conductance_k: 1.0
+    # Step size for Euler integration (learnable)
+    init_step_size: 0.1
 
 # ---------------------------------------------------------------------------
 # Training
