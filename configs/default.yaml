@@ -123,7 +123,7 @@ model:
     # Transformer dimensions
     hidden_dim: 512
     num_layers: 12
-    num_heads: 
+    num_heads: 16
     # Modality-pair conditioning (§4.1)
     num_modalities: 3
     modality_embed_dim: 128
