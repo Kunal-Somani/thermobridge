@@ -67,11 +67,8 @@ def main() -> None:
     pl.seed_everything(int(cfg.seed), workers=True)
 
     print(f"Git commit: {_git_commit_hash()}")
-    print("=" * 80)
-    print("Resolved config:")
     from omegaconf import OmegaConf
-    print(OmegaConf.to_yaml(cfg))
-    print("=" * 80)
+    print(f"Experiment: {args.experiment_name} | patch={list(cfg.patch.size)} | batch={cfg.training.batch_size} | epochs={cfg.training.max_epochs}")
 
     run_dir = args.out_dir / args.experiment_name
     run_dir.mkdir(parents=True, exist_ok=True)
