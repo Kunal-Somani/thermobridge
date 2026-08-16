@@ -186,7 +186,7 @@ def main() -> None:
         precision="16-mixed",
         gradient_clip_val=1.0,
         log_every_n_steps=10,
-        val_check_interval=1.0,
+        check_val_every_n_epoch=5,
         callbacks=callbacks,
         logger=logger,
     )
