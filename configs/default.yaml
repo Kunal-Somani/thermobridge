@@ -161,7 +161,7 @@ training:
   unet_channels: [32, 64, 128, 256]
   losses: { l1: 1.0, ssim: 0.0 }
   batch_size: 4 # 3D volumes are large; adjust after VRAM profiling
-  num_workers: 4
+  num_workers: 8
   max_epochs: 100
   val_every_n_epochs: 5
   ckpt_monitor: val/mae_hu
