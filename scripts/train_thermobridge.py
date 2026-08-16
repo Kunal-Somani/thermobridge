@@ -160,8 +160,8 @@ def main() -> None:
 
     checkpoint_cb = ModelCheckpoint(
         dirpath=str(ckpt_dir),
-        filename="best_{epoch:03d}_{val/mae_hu:.2f}",
-        monitor="val/mae_hu",
+        filename="best_{epoch:03d}_{val/loss_patch:.4f}",
+        monitor="val/loss_patch",
         mode="min",
         save_top_k=3,
         save_last=True,
@@ -198,9 +198,14 @@ def main() -> None:
     print(f"Best checkpoint: {checkpoint_cb.best_model_path}")
     best_score = checkpoint_cb.best_model_score
     if best_score is not None:
-        print(f"Best val/mae_hu_mean: {float(best_score):.4f} HU")
+        print(f"Best val/loss_patch: {float(best_score):.4f}")
     else:
-        print("Best val/mae_hu_mean: N/A (no validation metric recorded)")
+        print("Best val/loss_patch: N/A (no validation metric recorded)")
+
+    # ── Full HU-metric evaluation (once, on the held-out test set) ────────
+    dm.setup("test")
+    print("\nRunning evaluate_full() on the test set …")
+    model.evaluate_full(dm.test_dataloader())
 
 
 if __name__ == "__main__":
