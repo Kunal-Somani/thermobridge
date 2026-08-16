@@ -170,10 +170,19 @@ class CombinedDataModule(pl.LightningDataModule):
                 ds_2025_train,
             ])
 
-            ds_2023_val = ThermoBridgeEvalDataset(patient_ids=splits_2023["val"], manifest=manifest_2023)
-            ds_2025_val = SynthRAD2025EvalDataset(
+            # Val uses the same patch-sampling datasets as train (patch-based
+            # val loss, see LitBridge.validation_step) — full-volume eval
+            # datasets are reserved for evaluate_full() via test_dataloader().
+            ds_2023_val = ThermoBridgeTrainDataset(
+                patient_ids=splits_2023["val"], manifest=manifest_2023,
+                patch_size=patch_size, samples_per_volume=samples_per_volume,
+                fg_fraction=fg_fraction, base_seed=base_seed,
+            )
+            ds_2025_val = SynthRAD2025Dataset(
                 patient_ids=splits_2025["val"], manifest=manifest_2025,
-                modality_to_idx=self.modality_to_idx, anatomy_to_idx=self.anatomy_to_idx,
+                patch_size=patch_size, samples_per_volume=samples_per_volume,
+                fg_fraction=fg_fraction, modality_to_idx=self.modality_to_idx,
+                anatomy_to_idx=self.anatomy_to_idx, base_seed=base_seed,
             )
             self.val_ds = ConcatDataset([
                 _Legacy2023Wrapper(ds_2023_val, self.anatomy_to_idx, self.modality_to_idx),
@@ -213,15 +222,17 @@ class CombinedDataModule(pl.LightningDataModule):
 
     def val_dataloader(self) -> DataLoader:
         assert self.val_ds is not None, "Call setup('fit') first."
-        # Full-volume sliding-window inference is CPU-bound (unlike training's
-        # patch sampling), so val gets its own worker count to keep the GPU fed.
-        nw = 4
+        # Patch-based, same shape as train_dataloader (patch-based val loss,
+        # see LitBridge.validation_step) — not shuffled, so val order is
+        # still deterministic (R6).
+        nw = int(self.cfg.training.num_workers)
         return DataLoader(
             self.val_ds,
-            batch_size=1,
+            batch_size=int(self.cfg.training.batch_size),
             shuffle=False,
             num_workers=nw,
             pin_memory=(nw > 0),
+            drop_last=True,
             worker_init_fn=seed_worker if nw > 0 else None,
             persistent_workers=(nw > 0),
         )

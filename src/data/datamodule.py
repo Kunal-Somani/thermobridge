@@ -88,7 +88,7 @@ class ThermoBridgeDataModule(pl.LightningDataModule):
         self.overfit_n     = overfit_n     # if set, restrict train+val to N patients
 
         self.train_ds: ThermoBridgeTrainDataset | None = None
-        self.val_ds:   ThermoBridgeEvalDataset  | None = None
+        self.val_ds:   ThermoBridgeTrainDataset | None = None
         self.test_ds:  ThermoBridgeEvalDataset  | None = None
 
     # ------------------------------------------------------------------
@@ -125,9 +125,16 @@ class ThermoBridgeDataModule(pl.LightningDataModule):
                 fg_fraction        = fg_fraction,
                 base_seed          = base_seed,
             )
-            self.val_ds = ThermoBridgeEvalDataset(
-                patient_ids = val_ids,
-                manifest    = manifest,
+            # Val uses the same patch-sampling dataset as train (patch-based
+            # val loss, see LitBridge.validation_step) — full-volume eval
+            # dataset is reserved for evaluate_full() via test_dataloader().
+            self.val_ds = ThermoBridgeTrainDataset(
+                patient_ids        = val_ids,
+                manifest           = manifest,
+                patch_size         = patch_size,
+                samples_per_volume = samples_per_volume,
+                fg_fraction        = fg_fraction,
+                base_seed          = base_seed,
             )
 
         if stage in ("test", None):
@@ -157,13 +164,17 @@ class ThermoBridgeDataModule(pl.LightningDataModule):
 
     def val_dataloader(self) -> DataLoader:
         assert self.val_ds is not None, "Call setup('fit') first."
+        # Patch-based, same shape as train_dataloader (patch-based val loss,
+        # see LitBridge.validation_step) — not shuffled, so val order is
+        # still deterministic (R6).
         nw = int(self.cfg.training.num_workers)
         return DataLoader(
             self.val_ds,
-            batch_size  = 1,
+            batch_size  = int(self.cfg.training.batch_size),
             shuffle     = False,
             num_workers = nw,
             pin_memory  = (nw > 0),
+            drop_last   = True,
             worker_init_fn = seed_worker if nw > 0 else None,
             persistent_workers = (nw > 0),
         )
