@@ -163,6 +163,7 @@ training:
   batch_size: 4 # 3D volumes are large; adjust after VRAM profiling
   num_workers: 4
   max_epochs: 100
+  val_every_n_epochs: 5
   ckpt_monitor: val/mae_hu
   ckpt_mode: min
   optimizer:
