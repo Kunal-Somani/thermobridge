@@ -273,6 +273,9 @@ class LitBridge(pl.LightningModule):
         We accumulate into self._val_results and aggregate in
         on_validation_epoch_end().
         """
+        if self._fast_val and len(self._val_results) >= self._fast_val_limit:
+            return  # stop collecting after _fast_val_limit patients
+
         source   = batch["source"][0, 0].cpu().numpy()   # (Z, Y, X)
         target_t = batch["target"][0, 0].cpu().numpy()
         mask_np  = batch["mask"][0, 0].cpu().numpy()
@@ -331,6 +334,10 @@ class LitBridge(pl.LightningModule):
 
     def on_validation_epoch_start(self) -> None:
         self._val_results: list[dict] = []
+        # Fast validation (~15 patients) on every epoch except the last, where
+        # we run the full val set for the final reported metrics.
+        self._fast_val = self.trainer.current_epoch < self.trainer.max_epochs - 1
+        self._fast_val_limit = int(self.cfg.training.get("fast_val_patients", 15))
 
     def on_validation_epoch_end(self) -> None:
         if not self._val_results:
