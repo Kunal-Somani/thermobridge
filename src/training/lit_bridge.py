@@ -301,7 +301,9 @@ class LitBridge(pl.LightningModule):
         patch_size = tuple(int(x) for x in self.cfg.patch.size)
         overlap    = float(self.cfg.patch.inference_overlap)
 
-        pred_norm = sliding_window_predict(predictor, source, dir_id, patch_size, overlap)
+        pred_norm = sliding_window_predict(
+            predictor, source, dir_id, patch_size, overlap, device=self.device
+        )
 
         # Invert to HU / original scale (R2)
         if dir_id == 0:   # MR->CT: headline metric
