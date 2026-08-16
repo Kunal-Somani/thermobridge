@@ -212,7 +212,9 @@ class CombinedDataModule(pl.LightningDataModule):
 
     def val_dataloader(self) -> DataLoader:
         assert self.val_ds is not None, "Call setup('fit') first."
-        nw = int(self.cfg.training.num_workers)
+        # Full-volume sliding-window inference is CPU-bound (unlike training's
+        # patch sampling), so val gets its own worker count to keep the GPU fed.
+        nw = 4
         return DataLoader(
             self.val_ds,
             batch_size=1,
