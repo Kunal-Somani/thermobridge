@@ -75,9 +75,16 @@ def _git_commit_hash() -> str:
         return "unknown"
 
 
-def build_model(cfg) -> LitBridge:
+def build_model(cfg, args: argparse.Namespace) -> LitBridge:
     """Assemble ThermoBridgeDenoiser + AnatomyRouter/adapters + AnisotropicDiffusionOp + I2SBProcess."""
-    lit = LitBridge(cfg)
+    lit_kwargs: dict = {}
+    if args.manifest_2023 is not None:
+        lit_kwargs["manifest_path"] = args.manifest_2023
+    if args.splits_2023 is not None:
+        lit_kwargs["splits_path"] = args.splits_2023
+    if args.manifest_2025 is not None:
+        lit_kwargs["manifest_2025_path"] = args.manifest_2025
+    lit = LitBridge(cfg, **lit_kwargs)
     denoiser = lit.denoiser
 
     # --- Anatomy routing (§5) ---
@@ -145,7 +152,7 @@ def main() -> None:
     )
 
     # ── Model ────────────────────────────────────────────────────────────
-    model = build_model(cfg)
+    model = build_model(cfg, args)
 
     # ── Callbacks ────────────────────────────────────────────────────────
     ckpt_dir = run_dir / "checkpoints"
