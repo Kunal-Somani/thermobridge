@@ -33,15 +33,19 @@ them, so alpha has no effect on the forward pass yet.
 
 Validation
 ----------
-Runs the chunk-5 sliding-window harness with reverse_sample as the predictor,
-inverts CT->HU / MR->original scale, computes MAE-HU / PSNR / SSIM per
-(anatomy x direction), logs:
-    val/mae_hu                          — primary checkpoint monitor (MR->CT)
-    val/mae_hu_{anatomy}_{direction}    — per anatomy x direction breakdown
+Training-time validation_step() is a cheap patch-based bridge forward pass
+(same math as training_step, under no_grad) in normalized space — no HU
+inversion, no sliding window. It logs val/loss_patch, which is what
+ModelCheckpoint monitors. This keeps validation as fast as a training step.
+
+Full-volume, HU-inverted evaluation (the chunk-5 sliding-window harness,
+MAE-HU / PSNR / SSIM per anatomy x direction) is NOT run during training
+anymore. It lives in evaluate_full(), called once by the training script
+after trainer.fit() completes, on a held-out dataloader (e.g. test).
 
 Rules:
     R1 — all loss weights visible in config; each term logged separately.
-    R2 — CT/MR inversion done inside the val loop via chunk-5 harness, never skipped.
+    R2 — CT/MR inversion done inside evaluate_full() via chunk-5 harness, never skipped.
     R4 — epoch-level mean reported; no single-case peak.
     R6 — seed workers, deterministic val ordering (inherited from datamodule).
     R7 — typed, docstrings.
@@ -264,112 +268,156 @@ class LitBridge(pl.LightningModule):
         return loss_total
 
     # ------------------------------------------------------------------
-    # Validation — full-volume, deterministic reverse sampling, HU-inverted (R2)
+    # Validation — cheap patch-based bridge loss (normalized space, R2 N/A)
     # ------------------------------------------------------------------
 
     def validation_step(self, batch: dict, batch_idx: int) -> None:
-        """Collect per-patient results during the val epoch.
+        """One bridge forward pass on the val batch, under no_grad.
 
-        We accumulate into self._val_results and aggregate in
-        on_validation_epoch_end().
+        Mirrors training_step's math exactly, but with no backward pass and
+        no HU inversion — this is a normalized-space proxy loss, logged as
+        val/loss_patch, which ModelCheckpoint monitors. Full HU-metric
+        evaluation lives in evaluate_full() (see module docstring).
         """
-        if self._fast_val and len(self._val_results) >= self._fast_val_limit:
-            return  # stop collecting after _fast_val_limit patients
+        source = batch["source"]        # x_T (bridge start)
+        target = batch["target"]        # x_0 (bridge end)
+        dir_id = batch["direction_id"]
 
-        source   = batch["source"][0, 0].cpu().numpy()   # (Z, Y, X)
-        target_t = batch["target"][0, 0].cpu().numpy()
-        mask_np  = batch["mask"][0, 0].cpu().numpy()
-        dir_id   = int(batch["direction_id"][0].item())
-        pid      = batch["patient_id"][0]
-        anatomy  = batch["anatomy"][0]
+        x_T, x_0 = source, target
+        m_s = dir_id.long()
+        m_t = (1 - dir_id).long()
 
-        manifest_2023, _ = self._load_val_data()
-        if pid in manifest_2023:
-            entry     = manifest_2023[pid]
-            ct_params = entry["ct_norm_params"]
-            mr_params = entry["mr_norm_params"]
-        else:
-            # SynthRAD2025 patient (ADR-012) — different manifest, different
-            # param keys (src_norm_params covers both CBCT and MRI sources).
-            if self._manifest_2025 is None or pid not in self._manifest_2025:
-                raise KeyError(
-                    f"Patient id {pid!r} not found in either manifest_2023 "
-                    f"({self.manifest_path}) or manifest_2025 ({self.manifest_2025_path})."
-                )
-            entry     = self._manifest_2025[pid]
-            ct_params = entry["ct_norm_params"]
-            mr_params = entry.get("src_norm_params", {})
+        B = x_0.shape[0]
+        t = torch.rand(B, device=x_0.device)
+        alpha = self._make_alpha(B, x_0.device)
 
-        predictor = _BridgePredictor(self)
-        patch_size = tuple(int(x) for x in self.cfg.patch.size)
-        overlap    = float(self.cfg.patch.inference_overlap)
+        with torch.no_grad():
+            x_t, _noise = self.bridge.forward_marginal(x_0, x_T, t)
+            x_hat_0 = self.denoiser(x_t, t, m_s, m_t, alpha)
+            loss_patch = (x_hat_0 - x_0).abs().mean()
 
-        pred_norm = sliding_window_predict(
-            predictor, source, dir_id, patch_size, overlap, device=self.device
+        self.log(
+            "val/loss_patch", loss_patch,
+            on_step=False, on_epoch=True, prog_bar=True, sync_dist=True,
         )
 
-        # Invert to HU / original scale (R2)
-        if dir_id == 0:   # MR->CT: headline metric
-            pred_hu   = invert_ct_to_hu(pred_norm, ct_params)
-            target_hu = invert_ct_to_hu(target_t,  ct_params)
-            result    = compute_all_metrics(pred_hu, target_hu, mask_np)
-        elif mr_params:   # CT->MR: report on restored MR/CBCT scale
-            pred_mr   = invert_mr(pred_norm, mr_params)
-            target_mr = invert_mr(target_t,  mr_params)
-            result    = compute_all_metrics(pred_mr, target_mr, mask_np)
-        else:
-            # SynthRAD2025 CT->MR with no src_norm_params available to invert
-            # (e.g. CBCT<->CT pairs with no MRI norm stats) — skip HU
-            # inversion for the MRI target and report normalized MAE only.
-            result = compute_all_metrics(pred_norm, target_t, mask_np)
+    # ------------------------------------------------------------------
+    # Full-volume, HU-inverted evaluation — NOT run during training.
+    # Call once, after trainer.fit() completes, on a held-out dataloader.
+    # ------------------------------------------------------------------
 
-        self._val_results.append({
-            "mae_hu":   result.mae_hu,
-            "psnr":     result.psnr,
-            "ssim":     result.ssim,
-            "dir_id":   dir_id,
-            "anatomy":  anatomy,
-            "pid":      pid,
-        })
+    def evaluate_full(self, dataloader) -> dict:
+        """Sliding-window inference + HU-inverted metrics over `dataloader`.
 
-    def on_validation_epoch_start(self) -> None:
-        self._val_results: list[dict] = []
-        # Fast validation (~15 patients) on every epoch except the last, where
-        # we run the full val set for the final reported metrics.
-        self._fast_val = self.trainer.current_epoch < self.trainer.max_epochs - 1
-        self._fast_val_limit = int(self.cfg.training.get("fast_val_patients", 15))
+        Runs the chunk-5 sliding-window harness with reverse_sample as the
+        predictor, inverts CT->HU / MR->original scale, computes
+        MAE-HU / PSNR / SSIM per (anatomy x direction), prints a summary,
+        and returns the aggregated results.
 
-    def on_validation_epoch_end(self) -> None:
-        if not self._val_results:
-            return
+        Args:
+            dataloader: Any eval-style dataloader yielding batch_size=1
+                batches with source/target/mask/direction_id/patient_id/
+                anatomy keys (e.g. datamodule.test_dataloader()).
+
+        Returns:
+            Dict of aggregated (mean) metrics, keyed like
+            {"mae_hu_mr2ct": ..., "psnr_db_mr2ct": ..., ...}, plus the raw
+            per-patient rows under "rows".
+        """
+        self.eval()
+        manifest_2023, _ = self._load_val_data()
+        results: list[dict] = []
+
+        for batch in dataloader:
+            source   = batch["source"][0, 0].cpu().numpy()   # (Z, Y, X)
+            target_t = batch["target"][0, 0].cpu().numpy()
+            mask_np  = batch["mask"][0, 0].cpu().numpy()
+            dir_id   = int(batch["direction_id"][0].item())
+            pid      = batch["patient_id"][0]
+            anatomy  = batch["anatomy"][0]
+
+            if pid in manifest_2023:
+                entry     = manifest_2023[pid]
+                ct_params = entry["ct_norm_params"]
+                mr_params = entry["mr_norm_params"]
+            else:
+                # SynthRAD2025 patient (ADR-012) — different manifest, different
+                # param keys (src_norm_params covers both CBCT and MRI sources).
+                if self._manifest_2025 is None or pid not in self._manifest_2025:
+                    raise KeyError(
+                        f"Patient id {pid!r} not found in either manifest_2023 "
+                        f"({self.manifest_path}) or manifest_2025 ({self.manifest_2025_path})."
+                    )
+                entry     = self._manifest_2025[pid]
+                ct_params = entry["ct_norm_params"]
+                mr_params = entry.get("src_norm_params", {})
+
+            predictor = _BridgePredictor(self)
+            patch_size = tuple(int(x) for x in self.cfg.patch.size)
+            overlap    = float(self.cfg.patch.inference_overlap)
+
+            pred_norm = sliding_window_predict(
+                predictor, source, dir_id, patch_size, overlap, device=self.device
+            )
+
+            # Invert to HU / original scale (R2)
+            if dir_id == 0:   # MR->CT: headline metric
+                pred_hu   = invert_ct_to_hu(pred_norm, ct_params)
+                target_hu = invert_ct_to_hu(target_t,  ct_params)
+                result    = compute_all_metrics(pred_hu, target_hu, mask_np)
+            elif mr_params:   # CT->MR: report on restored MR/CBCT scale
+                pred_mr   = invert_mr(pred_norm, mr_params)
+                target_mr = invert_mr(target_t,  mr_params)
+                result    = compute_all_metrics(pred_mr, target_mr, mask_np)
+            else:
+                # SynthRAD2025 CT->MR with no src_norm_params available to invert
+                # (e.g. CBCT<->CT pairs with no MRI norm stats) — skip HU
+                # inversion for the MRI target and report normalized MAE only.
+                result = compute_all_metrics(pred_norm, target_t, mask_np)
+
+            results.append({
+                "mae_hu":   result.mae_hu,
+                "psnr":     result.psnr,
+                "ssim":     result.ssim,
+                "dir_id":   dir_id,
+                "anatomy":  anatomy,
+                "pid":      pid,
+            })
 
         def _mean(lst: list[dict], key: str) -> float:
             vals = [r[key] for r in lst if np.isfinite(r[key])]
             return float(np.mean(vals)) if vals else float("nan")
 
-        mr2ct = [r for r in self._val_results if r["dir_id"] == 0]
-        ct2mr = [r for r in self._val_results if r["dir_id"] == 1]
+        mr2ct = [r for r in results if r["dir_id"] == 0]
+        ct2mr = [r for r in results if r["dir_id"] == 1]
 
+        summary: dict[str, Any] = {"rows": results}
         if mr2ct:
-            self.log("val/mae_hu",  _mean(mr2ct, "mae_hu"), prog_bar=True,  sync_dist=True)
-            self.log("val/psnr_db", _mean(mr2ct, "psnr"),   prog_bar=False, sync_dist=True)
-            self.log("val/ssim",    _mean(mr2ct, "ssim"),   prog_bar=False, sync_dist=True)
+            summary["mae_hu_mr2ct"]  = _mean(mr2ct, "mae_hu")
+            summary["psnr_db_mr2ct"] = _mean(mr2ct, "psnr")
+            summary["ssim_mr2ct"]    = _mean(mr2ct, "ssim")
         if ct2mr:
-            self.log("val/mae_mr",     _mean(ct2mr, "mae_hu"), sync_dist=True)
-            self.log("val/psnr_ct2mr", _mean(ct2mr, "psnr"),   sync_dist=True)
+            summary["mae_hu_ct2mr"]  = _mean(ct2mr, "mae_hu")
+            summary["psnr_db_ct2mr"] = _mean(ct2mr, "psnr")
 
-        anatomies = sorted({r["anatomy"] for r in self._val_results})
+        anatomies = sorted({r["anatomy"] for r in results})
         for anat in anatomies:
             for dir_id, tag in [(0, "mr2ct"), (1, "ct2mr")]:
-                sub = [r for r in self._val_results
-                       if r["anatomy"] == anat and r["dir_id"] == dir_id]
+                sub = [r for r in results if r["anatomy"] == anat and r["dir_id"] == dir_id]
                 if sub:
-                    self.log(f"val/mae_hu_{anat}_{tag}", _mean(sub, "mae_hu"), sync_dist=True)
-                    self.log(f"val/psnr_{anat}_{tag}",   _mean(sub, "psnr"),   sync_dist=True)
+                    summary[f"mae_hu_{anat}_{tag}"] = _mean(sub, "mae_hu")
+                    summary[f"psnr_{anat}_{tag}"]   = _mean(sub, "psnr")
 
-        ep = self.current_epoch
-        mae = _mean(mr2ct, "mae_hu") if mr2ct else float("nan")
-        print(f"\n[Epoch {ep}] val/mae_hu (MR->CT) = {mae:.2f} HU", flush=True)
+        print("\n" + "=" * 76)
+        print("  evaluate_full() SUMMARY — mean over patients (R4)")
+        print("=" * 76)
+        for key, val in summary.items():
+            if key == "rows":
+                continue
+            print(f"  {key:<24} {val:.4f}")
+        print("=" * 76 + "\n", flush=True)
+
+        return summary
 
     # ------------------------------------------------------------------
     # Optimiser + scheduler  (warmup -> cosine)
