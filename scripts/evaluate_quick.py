@@ -1,15 +1,21 @@
-"""Quick proxy evaluation — single center-crop forward pass, no sliding window.
+"""Fast center-crop evaluation — full model (routing + anisotropic op + bridge).
 
-Loads a trained checkpoint and, for a handful of test patients per anatomy,
-runs ONE bridge reverse-sample call on the center [96,96,96] (cfg.patch.size)
-crop of each volume — instead of MONAI sliding-window inference over the
-whole volume. This trades full-volume coverage for speed: seconds per
-patient instead of minutes, giving a directional MAE-HU proxy metric.
+Loads a trained checkpoint into the SAME architecture train_thermobridge.py
+builds (denoiser + AnatomyRouter/adapters + AnisotropicDiffusionOp + I2SB
+bridge — see build_model() there), then for a handful of test patients per
+anatomy runs bridge.reverse_sample() with num_steps=10 on the center
+[96,96,96] crop of each volume — no MONAI sliding window, no DataLoader
+(npz files loaded directly with numpy). This trades full-volume coverage
+and reverse-sampling fidelity for speed: this is a fast proxy metric, NOT
+a substitute for LitBridge.evaluate_full() (the full-volume, sliding-window,
+R2/R4-compliant harness).
 
-This is NOT a substitute for LitBridge.evaluate_full() (the full-volume,
-sliding-window, R2/R4-compliant harness) — it's a fast sanity check to run
-between full evaluations, e.g. right after training completes or when
-comparing checkpoints quickly.
+Primary direction (source->CT, selected via --direction) is HU-inverted and
+compared against fixed baselines (U-Net: 88.29 HU, mean-CT floor: 655 HU —
+see outputs/reports/eval_mean_ct_*.csv / prior U-Net run logs for where
+these numbers come from). The reverse direction (CT->source) is also
+evaluated for the same patients, reported as normalized MAE/PSNR/SSIM (HU
+inversion doesn't apply to MR/CBCT).
 
 Usage::
     python scripts/evaluate_quick.py --config configs/default.yaml \\
@@ -18,7 +24,7 @@ Usage::
         --manifest-2025 outputs/preprocessed_2025/manifest_2025.json \\
         --splits-2023 outputs/splits.json \\
         --splits-2025 outputs/splits_synthrad2025.json \\
-        --patients-per-anatomy 5
+        --patients-per-anatomy 5 --direction mr_to_ct
 """
 
 from __future__ import annotations
@@ -37,12 +43,21 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from scripts.train_thermobridge import build_model
 from src.data.preprocess import invert_ct_to_hu, invert_mr
 from src.training.lit_bridge import LitBridge, _CBCT_IDX, _CT_IDX, _MR_IDX
 from src.training.metrics import compute_all_metrics
 from src.utils.config import load_config
 
 _MOD_NAME = {_MR_IDX: "mr", _CT_IDX: "ct", _CBCT_IDX: "cbct"}
+
+# Fixed comparison points (from prior baseline/U-Net evaluation runs — see
+# outputs/reports/eval_mean_ct_*.csv and the U-Net baseline run logs).
+BASELINE_UNET_MAE_HU = 88.29
+BASELINE_MEAN_CT_MAE_HU = 655.0
+
+PATCH_SIZE = (96, 96, 96)   # center crop — fixed, not read from cfg (R6: reproducible)
+NUM_STEPS = 10              # fast inference — not cfg.model.bridge.num_steps (25)
 
 
 # ---------------------------------------------------------------------------
@@ -52,7 +67,7 @@ _MOD_NAME = {_MR_IDX: "mr", _CT_IDX: "ct", _CBCT_IDX: "cbct"}
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Quick center-crop proxy evaluation (no sliding window)."
+        description="Fast center-crop proxy evaluation (no sliding window, no DataLoader)."
     )
     p.add_argument("--config", required=True, type=Path)
     p.add_argument("--checkpoint", required=True, type=Path)
@@ -64,10 +79,11 @@ def parse_args() -> argparse.Namespace:
                    default=_REPO_ROOT / "outputs" / "splits.json")
     p.add_argument("--splits-2025", type=Path,
                    default=_REPO_ROOT / "outputs" / "splits_synthrad2025.json")
-    p.add_argument("--split", default="test", choices=["val", "test"],
-                   help="Which split to sample patients from.")
     p.add_argument("--patients-per-anatomy", type=int, default=5,
                    help="Max patients evaluated per anatomy (for speed).")
+    p.add_argument("--direction", default="mr_to_ct", choices=["mr_to_ct", "cbct_to_ct"],
+                   help="Primary source->CT direction to evaluate + compare vs baselines. "
+                        "The reverse (CT->source) direction is always evaluated too.")
     return p.parse_args()
 
 
@@ -77,7 +93,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def center_crop(arr: np.ndarray, patch_size: tuple[int, int, int]) -> np.ndarray:
-    """Crop the center patch_size window out of a (Z, Y, X) volume."""
+    """Crop the center patch_size window out of a (Z, Y, X) volume. Deterministic (R6)."""
     Z, Y, X = arr.shape
     pZ, pY, pX = (min(p, s) for p, s in zip(patch_size, (Z, Y, X)))
     z0, y0, x0 = (Z - pZ) // 2, (Y - pY) // 2, (X - pX) // 2
@@ -85,7 +101,7 @@ def center_crop(arr: np.ndarray, patch_size: tuple[int, int, int]) -> np.ndarray
 
 
 # ---------------------------------------------------------------------------
-# Single forward pass (one reverse_sample call, no sliding window)
+# Single reverse_sample call (num_steps=10, no sliding window)
 # ---------------------------------------------------------------------------
 
 
@@ -96,85 +112,51 @@ def predict_patch(
     m_t_val: int,
     device: torch.device,
 ) -> np.ndarray:
-    """Run ONE bridge reverse-sample call on a single patch."""
     x_T = torch.from_numpy(source_norm[np.newaxis, np.newaxis]).float().to(device)
     m_s = torch.tensor([m_s_val], dtype=torch.long, device=device)
     m_t = torch.tensor([m_t_val], dtype=torch.long, device=device)
     alpha = model._make_alpha(1, device)
-    num_steps = int(model.cfg.model.bridge.num_steps)
     with torch.no_grad():
         x_hat_0 = model.bridge.reverse_sample(
-            model.denoiser, x_T, m_s, m_t, alpha, num_steps=num_steps
+            model.denoiser, x_T, m_s, m_t, alpha, num_steps=NUM_STEPS
         )
     return x_hat_0[0, 0].float().cpu().numpy()
 
 
 # ---------------------------------------------------------------------------
-# Per-patient, per-direction evaluation
+# Patient loading (no DataLoader — direct npz reads, R6)
 # ---------------------------------------------------------------------------
 
 
-def evaluate_patient_direction(
-    model: LitBridge,
-    entry: dict[str, Any],
-    pid: str,
-    is_2025: bool,
-    direction_id: int,
-    patch_size: tuple[int, int, int],
-    device: torch.device,
-) -> dict[str, Any]:
-    """Center-crop, single forward pass, HU-inverted metrics for one (patient, direction)."""
+def load_patient_arrays(entry: dict[str, Any], is_2025: bool) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Returns (source, ct, mask) full volumes for the patient's source modality."""
     if is_2025:
-        modality_src = entry["modality_src"]  # "mr" or "cbct"
-        m_src = _MR_IDX if modality_src == "mr" else _CBCT_IDX
-        src_full  = np.load(entry["src_path"])["data"]
-        ct_full   = np.load(entry["ct_path"])["data"]
-        mask_full = np.load(entry["mask_path"])["data"].astype(np.float32)
-        src_params = entry.get("src_norm_params", {})
-        ct_params  = entry["ct_norm_params"]
+        source = np.load(entry["src_path"])["data"]
     else:
-        m_src = _MR_IDX
-        src_full  = np.load(entry["mr_path"])["data"]
-        ct_full   = np.load(entry["ct_path"])["data"]
-        mask_full = np.load(entry["mask_path"])["data"].astype(np.float32)
-        src_params = entry["mr_norm_params"]
-        ct_params  = entry["ct_norm_params"]
+        source = np.load(entry["mr_path"])["data"]
+    ct   = np.load(entry["ct_path"])["data"]
+    mask = np.load(entry["mask_path"])["data"].astype(np.float32)
+    return source, ct, mask
 
-    if direction_id == 0:   # source -> CT
-        m_s, m_t = m_src, _CT_IDX
-        source_full, target_full, target_params = src_full, ct_full, ct_params
-    else:                    # CT -> source
-        m_s, m_t = _CT_IDX, m_src
-        source_full, target_full, target_params = ct_full, src_full, src_params
 
-    source_crop = center_crop(source_full, patch_size)
-    target_crop = center_crop(target_full, patch_size)
-    mask_crop   = center_crop(mask_full,   patch_size)
-
-    pred_norm = predict_patch(model, source_crop, m_s, m_t, device)
-
-    if m_t == _CT_IDX:       # target is CT: headline HU metric
-        pred_hu   = invert_ct_to_hu(pred_norm,   target_params)
-        target_hu = invert_ct_to_hu(target_crop, target_params)
-        result    = compute_all_metrics(pred_hu, target_hu, mask_crop)
-        mae_label = "mae_hu"
-    elif target_params:      # target is MR/CBCT with known norm params
-        pred_orig   = invert_mr(pred_norm,   target_params)
-        target_orig = invert_mr(target_crop, target_params)
-        result      = compute_all_metrics(pred_orig, target_orig, mask_crop)
-        mae_label   = "mae_hu"
-    else:                     # no norm params to invert — normalized MAE only
-        result    = compute_all_metrics(pred_norm, target_crop, mask_crop)
-        mae_label = "mae_norm"
-
-    return {
-        "patient_id":  pid,
-        "anatomy":     entry["anatomy"],
-        "direction":   f"{_MOD_NAME[m_s]}->{_MOD_NAME[m_t]}",
-        mae_label:     round(result.mae_hu, 4),
-        "psnr_db":     round(result.psnr, 4),
-        "ssim":        round(result.ssim, 6),
-    }
+def gather_patients(
+    manifest_2023: dict, splits_2023: dict,
+    manifest_2025: dict, splits_2025: dict,
+    direction: str, split: str = "test",
+) -> list[tuple[str, bool]]:
+    """(pid, is_2025) pairs whose source modality matches `direction`."""
+    candidates: list[tuple[str, bool]] = []
+    if direction == "mr_to_ct":
+        for pid in sorted(splits_2023[split]):
+            candidates.append((pid, False))
+        for pid in sorted(splits_2025[split]):
+            if manifest_2025[pid]["modality_src"] == "mr":
+                candidates.append((pid, True))
+    else:  # cbct_to_ct — SynthRAD2025 Task2 only
+        for pid in sorted(splits_2025[split]):
+            if manifest_2025[pid]["modality_src"] == "cbct":
+                candidates.append((pid, True))
+    return candidates
 
 
 # ---------------------------------------------------------------------------
@@ -195,70 +177,120 @@ def main() -> None:
     with open(args.splits_2025) as f:
         splits_2025 = json.load(f)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Loading checkpoint {args.checkpoint} onto {device} …")
-    model = LitBridge.load_from_checkpoint(
-        str(args.checkpoint),
-        cfg=cfg,
-        manifest_path=args.manifest_2023,
-        splits_path=args.splits_2023,
-        manifest_2025_path=args.manifest_2025,
-        map_location=device,
-    )
-    model.to(device)
-    model.eval()
+    # ── Build the full model (denoiser + router/adapters + anisotropic op +
+    # bridge), same assembly as train_thermobridge.py's build_model(). This
+    # reads hidden_dim from cfg.model.denoiser.hidden_dim for the router —
+    # NOT a hardcoded value — since build_model() already does so.
+    model = build_model(cfg, args)
 
-    patch_size = tuple(int(x) for x in cfg.patch.size)
+    print(f"Loading checkpoint (map_location='cpu'): {args.checkpoint}")
+    ckpt = torch.load(str(args.checkpoint), map_location="cpu")
+    state_dict = ckpt["state_dict"] if "state_dict" in ckpt else ckpt
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    if missing:
+        print(f"  warning: {len(missing)} missing keys (e.g. {missing[:3]})")
+    if unexpected:
+        print(f"  warning: {len(unexpected)} unexpected keys (e.g. {unexpected[:3]})")
+
+    model = model.cuda()
+    model.eval()
+    device = next(model.denoiser.parameters()).device
 
     # ── Gather + limit patients per anatomy ──────────────────────────────
+    candidates = gather_patients(manifest_2023, splits_2023, manifest_2025, splits_2025, args.direction)
+
     anatomy_to_pids: dict[str, list[tuple[str, bool]]] = defaultdict(list)
-    for pid in sorted(splits_2023[args.split]):
-        anatomy_to_pids[manifest_2023[pid]["anatomy"]].append((pid, False))
-    for pid in sorted(splits_2025[args.split]):
-        anatomy_to_pids[manifest_2025[pid]["anatomy"]].append((pid, True))
+    for pid, is_2025 in candidates:
+        entry = manifest_2025[pid] if is_2025 else manifest_2023[pid]
+        anatomy_to_pids[entry["anatomy"]].append((pid, is_2025))
 
     selected: list[tuple[str, bool]] = []
     for anatomy in sorted(anatomy_to_pids):
         selected.extend(anatomy_to_pids[anatomy][: args.patients_per_anatomy])
 
-    print(f"Evaluating {len(selected)} patients "
-          f"(<= {args.patients_per_anatomy} per anatomy, split='{args.split}') "
-          f"— center-crop {patch_size}, no sliding window.\n")
+    total = len(selected)
+    print(f"\nEvaluating {total} patients (<= {args.patients_per_anatomy} per anatomy), "
+          f"direction={args.direction}, center-crop {PATCH_SIZE}, num_steps={NUM_STEPS}.\n")
 
-    # ── Run ───────────────────────────────────────────────────────────────
-    rows: list[dict[str, Any]] = []
-    for pid, is_2025 in selected:
+    # ── Run: primary (source->CT, HU) + reverse (CT->source, normalized) ──
+    primary_rows: list[dict[str, Any]] = []
+    reverse_rows: list[dict[str, Any]] = []
+
+    for i, (pid, is_2025) in enumerate(selected, 1):
         entry = manifest_2025[pid] if is_2025 else manifest_2023[pid]
-        for direction_id in (0, 1):
-            try:
-                row = evaluate_patient_direction(
-                    model, entry, pid, is_2025, direction_id, patch_size, device
-                )
-                rows.append(row)
-                mae_key = "mae_hu" if "mae_hu" in row else "mae_norm"
-                print(f"  {pid:<12} {entry['anatomy']:<8} {row['direction']:<8} "
-                      f"{mae_key}={row[mae_key]:>8.2f}  psnr={row['psnr_db']:>6.2f}dB")
-            except Exception as exc:
-                print(f"  {pid:<12} direction {direction_id} FAILED: {exc}")
+        anatomy = entry["anatomy"]
+        try:
+            if is_2025:
+                m_src = _MR_IDX if entry["modality_src"] == "mr" else _CBCT_IDX
+                src_params = entry.get("src_norm_params", {})
+            else:
+                m_src = _MR_IDX
+                src_params = entry["mr_norm_params"]
+            ct_params = entry["ct_norm_params"]
 
-    # ── Aggregate: per anatomy x direction ──────────────────────────────
+            source_full, ct_full, mask_full = load_patient_arrays(entry, is_2025)
+            source_crop = center_crop(source_full, PATCH_SIZE)
+            target_crop = center_crop(ct_full,     PATCH_SIZE)
+            mask_crop   = center_crop(mask_full,   PATCH_SIZE)
+
+            # Primary: source -> CT, HU-inverted, in-mask MAE (R2)
+            pred_norm = predict_patch(model, source_crop, m_src, _CT_IDX, device)
+            pred_hu   = invert_ct_to_hu(pred_norm,  ct_params)
+            target_hu = invert_ct_to_hu(target_crop, ct_params)
+            result    = compute_all_metrics(pred_hu, target_hu, mask_crop)
+
+            print(f"[{i}/{total}] {pid} {anatomy} ({_MOD_NAME[m_src]}->ct) MAE={result.mae_hu:.2f} HU")
+            primary_rows.append({
+                "pid": pid, "anatomy": anatomy,
+                "mae_hu": result.mae_hu, "psnr": result.psnr, "ssim": result.ssim,
+            })
+
+            # Also evaluate CT -> source direction (normalized MAE/PSNR/SSIM)
+            pred_norm_rev = predict_patch(model, target_crop, _CT_IDX, m_src, device)
+            if src_params:
+                pred_orig   = invert_mr(pred_norm_rev, src_params)
+                target_orig = invert_mr(source_crop,   src_params)
+                result_rev  = compute_all_metrics(pred_orig, target_orig, mask_crop)
+            else:
+                result_rev = compute_all_metrics(pred_norm_rev, source_crop, mask_crop)
+            reverse_rows.append({
+                "pid": pid, "anatomy": anatomy,
+                "mae": result_rev.mae_hu, "psnr": result_rev.psnr, "ssim": result_rev.ssim,
+            })
+        except Exception as exc:
+            print(f"[{i}/{total}] {pid} {anatomy} FAILED: {exc}")
+
+    # ── Summary: primary direction, per anatomy + overall, vs baselines ──
     print("\n" + "=" * 72)
-    print("  QUICK EVAL SUMMARY — center-crop proxy MAE (mean over patients)")
+    print(f"  QUICK EVAL SUMMARY — {args.direction} — center-crop MAE-HU (mean ± std)")
     print("=" * 72)
 
-    anatomies = sorted({r["anatomy"] for r in rows})
-    for anatomy in anatomies:
-        anat_rows = [r for r in rows if r["anatomy"] == anatomy]
-        directions = sorted({r["direction"] for r in anat_rows})
-        for direction in directions:
-            grp = [r for r in anat_rows if r["direction"] == direction]
-            mae_key = "mae_hu" if "mae_hu" in grp[0] else "mae_norm"
-            maes = [r[mae_key] for r in grp]
-            psnrs = [r["psnr_db"] for r in grp]
-            print(f"  {anatomy:<8} {direction:<8} "
-                  f"{mae_key}={np.mean(maes):>8.2f}±{np.std(maes):<6.2f}  "
-                  f"psnr={np.mean(psnrs):>6.2f}dB  n={len(grp)}")
-    print("=" * 72 + "\n")
+    for anatomy in sorted({r["anatomy"] for r in primary_rows}):
+        group = [r["mae_hu"] for r in primary_rows if r["anatomy"] == anatomy]
+        print(f"  {anatomy:<8}  MAE-HU = {np.mean(group):>8.2f} ± {np.std(group):<6.2f}  n={len(group)}")
+
+    if primary_rows:
+        all_mae = [r["mae_hu"] for r in primary_rows]
+        print("  " + "-" * 68)
+        print(f"  {'ALL':<8}  MAE-HU = {np.mean(all_mae):>8.2f} ± {np.std(all_mae):<6.2f}  n={len(all_mae)}")
+
+        print("\n  vs. baselines:")
+        print(f"    U-Net baseline    : {BASELINE_UNET_MAE_HU:>8.2f} HU")
+        print(f"    mean-CT floor     : {BASELINE_MEAN_CT_MAE_HU:>8.2f} HU")
+        print(f"    ThermoBridge (here): {np.mean(all_mae):>8.2f} HU")
+    print("=" * 72)
+
+    # ── Summary: reverse direction (CT -> source), normalized ────────────
+    print(f"\n  CT->source — normalized MAE / PSNR / SSIM (mean ± std)")
+    print("  " + "-" * 68)
+    for anatomy in sorted({r["anatomy"] for r in reverse_rows}):
+        group = [r for r in reverse_rows if r["anatomy"] == anatomy]
+        maes  = [r["mae"]  for r in group]
+        psnrs = [r["psnr"] for r in group]
+        ssims = [r["ssim"] for r in group]
+        print(f"  {anatomy:<8}  MAE={np.mean(maes):>8.4f}±{np.std(maes):<7.4f}  "
+              f"PSNR={np.mean(psnrs):>6.2f}dB  SSIM={np.mean(ssims):>6.4f}  n={len(group)}")
+    print()
 
 
 if __name__ == "__main__":
