@@ -199,6 +199,7 @@ def sliding_window_predict(
     direction_id: int,
     patch_size: tuple[int, int, int],
     overlap: float = 0.5,
+    device: "torch.device | str | None" = None,
 ) -> np.ndarray:
     """Run predictor over a full volume with MONAI sliding-window overlap blending.
 
@@ -211,6 +212,9 @@ def sliding_window_predict(
         direction_id: Translation direction (0 or 1).
         patch_size:   Inference patch size (Z, Y, X).
         overlap:      Fraction overlap between adjacent windows.
+        device:       Device to run inference on. If None, auto-detects from
+            `predictor._mod.denoiser` when available (LitBridge's
+            _BridgePredictor), else falls back to CPU.
 
     Returns:
         Predicted volume in normalised target space, shape (Z, Y, X).
@@ -221,18 +225,26 @@ def sliding_window_predict(
     Z, Y, X = source_norm.shape
     pZ, pY, pX = patch_size
 
+    if device is None:
+        mod = getattr(predictor, "_mod", None)
+        denoiser = getattr(mod, "denoiser", None)
+        device = next(denoiser.parameters()).device if denoiser is not None else torch.device("cpu")
+    device = torch.device(device)
+
     # Never run a whole (possibly large) volume through the net at once — that
     # path can OOM the 8 GB GPU and crash the shared display session. Clamp the
     # ROI to the volume size and always sliding-window it instead.
     roi_size = [min(p, s) for p, s in zip(patch_size, (Z, Y, X))]
 
-    # MONAI sliding_window_inference expects (B, C, Z, Y, X)
-    src_t = torch.from_numpy(source_norm[np.newaxis, np.newaxis]).float()
+    # MONAI sliding_window_inference expects (B, C, Z, Y, X). Move to the
+    # target device up front so window extraction/blending stays on-GPU;
+    # only the final result is brought back to CPU/numpy for metrics.
+    src_t = torch.from_numpy(source_norm[np.newaxis, np.newaxis]).float().to(device)
 
     def _predictor_fn(patch: "torch.Tensor") -> "torch.Tensor":
-        patch_np = patch[0, 0].numpy()  # (Z, Y, X)
+        patch_np = patch[0, 0].cpu().numpy()  # (Z, Y, X)
         out_np = predictor.predict(patch_np, direction_id)
-        return torch.from_numpy(out_np[np.newaxis, np.newaxis]).float()
+        return torch.from_numpy(out_np[np.newaxis, np.newaxis]).float().to(device)
 
     with torch.no_grad():
         result = sliding_window_inference(
@@ -244,7 +256,7 @@ def sliding_window_predict(
             mode         = "gaussian",
         )
 
-    return result[0, 0].numpy()
+    return result[0, 0].cpu().numpy()
 
 
 # ---------------------------------------------------------------------------
