@@ -164,6 +164,7 @@ training:
   num_workers: 8
   max_epochs: 100
   val_every_n_epochs: 5
+  fast_val_patients: 15
   ckpt_monitor: val/mae_hu
   ckpt_mode: min
   optimizer:
