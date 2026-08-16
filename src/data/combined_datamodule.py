@@ -208,6 +208,7 @@ class CombinedDataModule(pl.LightningDataModule):
             worker_init_fn=seed_worker if nw > 0 else None,
             generator=_make_generator(int(self.cfg.seed)),
             persistent_workers=(nw > 0),
+            prefetch_factor=2 if nw > 0 else None,
         )
 
     def val_dataloader(self) -> DataLoader:
