@@ -162,7 +162,8 @@ training:
   losses: { l1: 1.0, ssim: 0.0 }
   batch_size: 6 # 3D volumes are large; adjust after VRAM profiling
   num_workers: 8
-  max_epochs: 100
+  max_epochs: 200
+  overfit_batches: 0
   val_every_n_epochs: 5
   fast_val_patients: 15
   ckpt_monitor: val/mae_hu
