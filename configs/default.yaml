@@ -197,11 +197,12 @@ loss:
   # them as zero contribution until those components exist.
   weights:
     rec: 1.0    # λ_rec
-    bnd: 0.1    # λ_bnd — placeholder, sweep later
+    ssim: 0.5   # λ_ssim — SSIM loss (1-SSIM), analogous to IC3 combined loss
+    bnd: 0.5    # λ_bnd — boundary loss needs more weight
     rad: 0.1    # λ_rad — placeholder, sweep later
     ent: 0.01   # λ_ent
     bal: 0.01   # λ_bal
-    cls: 0.0    # λ_cls — off by default (ADR-003)
+    cls: 0.1    # λ_cls — gate supervision enabled
 
 # ---------------------------------------------------------------------------
 # Evaluation (§9)

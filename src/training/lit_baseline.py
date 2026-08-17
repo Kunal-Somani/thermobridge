@@ -123,8 +123,12 @@ class LitBaseline(pl.LightningModule):
 
     Args:
         cfg:  Fully resolved OmegaConf config (from load_config).
-        manifest_path: Path to outputs/preprocessed/manifest.json.
-        splits_path:   Path to outputs/splits.json.
+        manifest_path: Path to outputs/preprocessed/manifest.json (SynthRAD2023).
+        splits_path:   Path to outputs/splits.json (SynthRAD2023).
+        manifest_2025_path: Path to outputs/preprocessed_2025/manifest_2025.json
+            (SynthRAD2025). Optional — validation_step falls back to this
+            manifest for patient IDs not found in manifest_path (needed when
+            trained via CombinedDataModule, see train_unet_baseline.py).
     """
 
     def __init__(
@@ -132,11 +136,13 @@ class LitBaseline(pl.LightningModule):
         cfg: Any,
         manifest_path: Path = _REPO_ROOT / "outputs" / "preprocessed" / "manifest.json",
         splits_path:   Path = _REPO_ROOT / "outputs" / "splits.json",
+        manifest_2025_path: Path | None = _REPO_ROOT / "outputs" / "preprocessed_2025" / "manifest_2025.json",
     ) -> None:
         super().__init__()
-        self.cfg           = cfg
-        self.manifest_path = manifest_path
-        self.splits_path   = splits_path
+        self.cfg                = cfg
+        self.manifest_path      = manifest_path
+        self.splits_path        = splits_path
+        self.manifest_2025_path = manifest_2025_path
 
         # Build model
         self.model = build_unet3d(cfg.training)
@@ -146,8 +152,14 @@ class LitBaseline(pl.LightningModule):
         self.w_l1   = float(losses.get("l1",   1.0))
         self.w_ssim = float(losses.get("ssim",  0.0))
 
+        # Combined anatomy index map (Chunk N1) — anatomy arrives as int when
+        # trained via CombinedDataModule, string when via ThermoBridgeDataModule.
+        combined_cfg = getattr(cfg.data, "combined", None)
+        self.anatomy_to_idx = dict(combined_cfg.anatomy_to_idx) if combined_cfg is not None else {"brain": 0, "pelvis": 1}
+
         # Lazy-loaded manifest / splits for val loop
-        self._manifest: dict | None = None
+        self._manifest:      dict | None = None  # SynthRAD2023
+        self._manifest_2025: dict | None = None  # SynthRAD2025
         self._val_ids:  list[str] | None = None
 
         self.save_hyperparameters(ignore=["cfg"])
@@ -160,6 +172,11 @@ class LitBaseline(pl.LightningModule):
         if self._manifest is None:
             with open(self.manifest_path) as f:
                 self._manifest = json.load(f)
+        if self._manifest_2025 is None and self.manifest_2025_path is not None:
+            manifest_2025_path = Path(self.manifest_2025_path)
+            if manifest_2025_path.exists():
+                with open(manifest_2025_path) as f:
+                    self._manifest_2025 = json.load(f)
         if self._val_ids is None:
             with open(self.splits_path) as f:
                 splits = json.load(f)
@@ -220,10 +237,22 @@ class LitBaseline(pl.LightningModule):
         pid      = batch["patient_id"][0]
         anatomy  = batch["anatomy"][0]
 
-        manifest, _ = self._load_val_data()
-        entry = manifest[pid]
-        ct_params = entry["ct_norm_params"]
-        mr_params = entry["mr_norm_params"]
+        self._load_val_data()
+        if pid in self._manifest:
+            entry     = self._manifest[pid]
+            ct_params = entry["ct_norm_params"]
+            mr_params = entry["mr_norm_params"]
+        else:
+            # SynthRAD2025 patient (ADR-012) — different manifest, different
+            # param keys (src_norm_params covers both CBCT and MRI sources).
+            if self._manifest_2025 is None or pid not in self._manifest_2025:
+                raise KeyError(
+                    f"Patient id {pid!r} not found in either manifest_2023 "
+                    f"({self.manifest_path}) or manifest_2025 ({self.manifest_2025_path})."
+                )
+            entry     = self._manifest_2025[pid]
+            ct_params = entry["ct_norm_params"]
+            mr_params = entry.get("src_norm_params", {})
 
         # Sliding-window inference on CPU (GPU device handled by predictor)
         predictor = _UNetPredictor(self)
@@ -237,10 +266,14 @@ class LitBaseline(pl.LightningModule):
             pred_hu   = invert_ct_to_hu(pred_norm, ct_params)
             target_hu = invert_ct_to_hu(target_t,  ct_params)
             result    = compute_all_metrics(pred_hu, target_hu, mask_np)
-        else:             # CT→MR: report on restored MR scale
+        elif mr_params:   # CT→MR: report on restored MR/CBCT scale
             pred_mr   = invert_mr(pred_norm, mr_params)
             target_mr = invert_mr(target_t,  mr_params)
             result    = compute_all_metrics(pred_mr, target_mr, mask_np)
+        else:
+            # SynthRAD2025 CT->MR with no src_norm_params available to invert —
+            # skip HU inversion for the MRI target and report normalized MAE only.
+            result = compute_all_metrics(pred_norm, target_t, mask_np)
 
         self._val_results.append({
             "mae_hu":   result.mae_hu,
@@ -276,13 +309,13 @@ class LitBaseline(pl.LightningModule):
             self.log("val/psnr_ct2mr",  _mean(ct2mr, "psnr"),   sync_dist=True)
 
         # ── Per anatomy × direction ───────────────────────────────────────
-        for anat in ("brain", "pelvis"):
+        for anat_name, anat_idx in self.anatomy_to_idx.items():
             for dir_id, tag in [(0, "mr2ct"), (1, "ct2mr")]:
                 sub = [r for r in self._val_results
-                       if r["anatomy"] == anat and r["dir_id"] == dir_id]
+                       if r["anatomy"] == anat_idx and r["dir_id"] == dir_id]
                 if sub:
-                    self.log(f"val/mae_hu_{anat}_{tag}", _mean(sub, "mae_hu"), sync_dist=True)
-                    self.log(f"val/psnr_{anat}_{tag}",   _mean(sub, "psnr"),   sync_dist=True)
+                    self.log(f"val/mae_hu_{anat_name}_{tag}", _mean(sub, "mae_hu"), sync_dist=True)
+                    self.log(f"val/psnr_{anat_name}_{tag}",   _mean(sub, "psnr"),   sync_dist=True)
 
         # ── Print summary ─────────────────────────────────────────────────
         ep = self.current_epoch

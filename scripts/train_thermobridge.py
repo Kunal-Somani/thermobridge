@@ -203,9 +203,13 @@ def main() -> None:
         print("Best val/loss_patch: N/A (no validation metric recorded)")
 
     # ── Full HU-metric evaluation (once, on the held-out test set) ────────
+    # num_workers=0 here (not dm.test_dataloader()'s cfg.training.num_workers)
+    # to avoid the shared-memory bus error on this container.
+    from torch.utils.data import DataLoader
     dm.setup("test")
     print("\nRunning evaluate_full() on the test set …")
-    model.evaluate_full(dm.test_dataloader())
+    test_loader = DataLoader(dm.test_ds, batch_size=1, shuffle=False, num_workers=0, pin_memory=False)
+    model.evaluate_full(test_loader)
 
 
 if __name__ == "__main__":

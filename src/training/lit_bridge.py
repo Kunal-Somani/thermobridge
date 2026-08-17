@@ -2,9 +2,10 @@
 
 Loss terms (§7)
 ----------------
-L_total = λ_rec·L_rec + λ_bnd·L_bnd + λ_rad·L_rad + λ_ent·L_ent + λ_bal·L_bal + λ_cls·L_cls
+L_total = λ_rec·L_rec + λ_ssim·L_ssim + λ_bnd·L_bnd + λ_rad·L_rad + λ_ent·L_ent + λ_bal·L_bal + λ_cls·L_cls
 
-L_rec (§3, I2SB bridge reconstruction) and L_rad (§7, ADR-011, Radon-domain
+L_rec (§3, I2SB bridge reconstruction), L_ssim (1 − SSIM on x_hat_0 vs x_0,
+IC3-derived lesson — Chunk V4), and L_rad (§7, ADR-011, Radon-domain
 consistency — Chunk 10) are implemented. L_rad is computed only for samples
 whose target modality is CT or CBCT (m_t index 1 or 2); MRI-target samples
 contribute exactly 0 via RadonConsistencyLoss's mask, matching the spec's
@@ -61,6 +62,7 @@ from typing import Any
 import numpy as np
 import torch
 import pytorch_lightning as pl
+from torchmetrics.functional import structural_similarity_index_measure as ssim_metric
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
@@ -155,6 +157,7 @@ class LitBridge(pl.LightningModule):
         # §7 loss weights (R1 — from config, explicit, never hardcoded)
         weights = dict(cfg.loss.weights)
         self.w_rec = float(weights.get("rec", 1.0))
+        self.w_ssim = float(weights.get("ssim", 0.0))
         self.w_bnd = float(weights.get("bnd", 0.0))
         self.w_rad = float(weights.get("rad", 0.0))
         self.w_ent = float(weights.get("ent", 0.0))
@@ -238,6 +241,9 @@ class LitBridge(pl.LightningModule):
         l1_per_sample = (x_hat_0 - x_0).abs().flatten(1).mean(dim=1)
         loss_rec = (w_t * l1_per_sample).mean()
 
+        # L_ssim (IC3-derived lesson — Chunk V4): 1-SSIM on x_hat_0 vs x_0.
+        loss_ssim = 1.0 - ssim_metric(x_hat_0.float(), x_0.float(), data_range=2.0)
+
         # L_rad (§7, ADR-011, Chunk 10): only for CT/CBCT targets.
         is_ct_or_cbct = ((m_t == _CT_IDX) | (m_t == _CBCT_IDX)).float()
         loss_rad = self.radon_loss(x_hat_0, x_0, is_ct_or_cbct)
@@ -249,6 +255,7 @@ class LitBridge(pl.LightningModule):
 
         loss_total = (
             self.w_rec * loss_rec
+            + self.w_ssim * loss_ssim
             + self.w_bnd * loss_bnd
             + self.w_rad * loss_rad
             + self.w_ent * loss_ent
@@ -257,6 +264,7 @@ class LitBridge(pl.LightningModule):
         )
 
         self.log("train/loss_rec",   loss_rec,   on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
+        self.log("train/loss_ssim",  loss_ssim,  on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
         self.log("train/loss_bnd",   loss_bnd,   on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
         self.log("train/loss_rad",   loss_rad,   on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
         self.log("train/loss_ent",   loss_ent,   on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
@@ -317,7 +325,9 @@ class LitBridge(pl.LightningModule):
         Args:
             dataloader: Any eval-style dataloader yielding batch_size=1
                 batches with source/target/mask/direction_id/patient_id/
-                anatomy keys (e.g. datamodule.test_dataloader()).
+                anatomy keys (e.g. datamodule.test_dataloader()). Call with a
+                DataLoader built with num_workers=0 to avoid shm bus error on
+                this container.
 
         Returns:
             Dict of aggregated (mean) metrics, keyed like

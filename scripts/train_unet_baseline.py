@@ -31,20 +31,20 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from src.data.datamodule import ThermoBridgeDataModule
+from src.data.combined_datamodule import CombinedDataModule
 from src.training.lit_baseline import LitBaseline
 from src.utils.config import load_config
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="ThermoBridge — train U-Net baseline (SynthRAD2023 only).")
+    p = argparse.ArgumentParser(description="ThermoBridge — train U-Net baseline (combined SynthRAD2023+2025 dataset, for fair comparison with ThermoBridge).")
     p.add_argument("--config", required=True, type=Path, help="Path to YAML config (e.g. configs/default.yaml).")
     p.add_argument("--data-root-2023", type=Path, default=None, help="SynthRAD2023 data root (informational; paths come from manifest).")
-    p.add_argument("--data-root-2025", type=Path, default=None, help="Unused by this baseline (SynthRAD2023 only); accepted for CLI symmetry.")
+    p.add_argument("--data-root-2025", type=Path, default=None, help="SynthRAD2025 data root (informational; paths come from manifest).")
     p.add_argument("--manifest-2023", type=Path, default=None, help="Path to SynthRAD2023 preprocessed manifest.json.")
-    p.add_argument("--manifest-2025", type=Path, default=None, help="Unused by this baseline; accepted for CLI symmetry.")
+    p.add_argument("--manifest-2025", type=Path, default=None, help="Path to SynthRAD2025 preprocessed manifest_2025.json.")
     p.add_argument("--splits-2023", type=Path, default=None, help="Path to SynthRAD2023 outputs/splits.json.")
-    p.add_argument("--splits-2025", type=Path, default=None, help="Unused by this baseline; accepted for CLI symmetry.")
+    p.add_argument("--splits-2025", type=Path, default=None, help="Path to SynthRAD2025 challenge splits JSON.")
     p.add_argument("--out-dir", type=Path, default=_REPO_ROOT / "outputs" / "runs", help="Root directory for run outputs.")
     p.add_argument("--experiment-name", type=str, default="unet_baseline", help="Experiment/run name (subdirectory of --out-dir).")
     p.add_argument("--resume", type=Path, default=None, help="Checkpoint path to resume from.")
@@ -75,15 +75,24 @@ def main() -> None:
     (run_dir / "resolved_config.yaml").write_text(OmegaConf.to_yaml(cfg))
     print(f"Run dir: {run_dir}")
 
-    # ── DataModule (SynthRAD2023 only) ──────────────────────────────────
-    dm = ThermoBridgeDataModule(
+    # ── DataModule (combined SynthRAD2023+2025, ADR-012) ────────────────
+    dm = CombinedDataModule(
         cfg,
         splits_path=args.splits_2023,
         manifest_path=args.manifest_2023,
+        synthrad2025_splits_path=args.splits_2025,
+        manifest_2025_path=args.manifest_2025,
     )
 
     # ── Model ────────────────────────────────────────────────────────────
-    model = LitBaseline(cfg)
+    lit_kwargs: dict = {}
+    if args.manifest_2023 is not None:
+        lit_kwargs["manifest_path"] = args.manifest_2023
+    if args.splits_2023 is not None:
+        lit_kwargs["splits_path"] = args.splits_2023
+    if args.manifest_2025 is not None:
+        lit_kwargs["manifest_2025_path"] = args.manifest_2025
+    model = LitBaseline(cfg, **lit_kwargs)
 
     # ── Callbacks ────────────────────────────────────────────────────────
     ckpt_dir = run_dir / "checkpoints"
