@@ -176,7 +176,7 @@ def main() -> None:
         pass
 
     # ── Logger (CSV only, no wandb) ─────────────────────────────────────
-    logger = CSVLogger(save_dir=str(run_dir), name="logs", version=0)
+    logger = CSVLogger(save_dir=str(run_dir), name="logs", version=0, flush_logs_every_n_steps=1)
 
     # ── Trainer ──────────────────────────────────────────────────────────
     trainer = pl.Trainer(
