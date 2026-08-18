@@ -5,18 +5,21 @@ Loss terms (§7)
 L_total = λ_rec·L_rec + λ_ssim·L_ssim + λ_bnd·L_bnd + λ_rad·L_rad + λ_ent·L_ent + λ_bal·L_bal + λ_cls·L_cls
 
 L_rec (§3, I2SB bridge reconstruction), L_ssim (1 − SSIM on x_hat_0 vs x_0,
-IC3-derived lesson — Chunk V4), and L_rad (§7, ADR-011, Radon-domain
-consistency — Chunk 10) are implemented. L_rad is computed only for samples
-whose target modality is CT or CBCT (m_t index 1 or 2); MRI-target samples
-contribute exactly 0 via RadonConsistencyLoss's mask, matching the spec's
-"Applied when: Target is CT or CBCT only". L_bnd needs the anisotropic
-operator's edge information wired into a boundary loss (not yet built);
-L_ent/L_bal need the routing gate's outputs threaded through RoutingLoss
-(the gate itself exists since Chunk 9, but its losses aren't wired here
-yet); L_cls is optional (ADR-003) and needs anatomy labels. Their λ weights
-are read from cfg.loss.weights and logged every step at their actual (zero)
-contribution — nothing is hidden (Rule 1), they simply have no
-implementation yet.
+IC3-derived lesson — Chunk V4), L_rad (§7, ADR-011, Radon-domain consistency —
+Chunk 10), L_bnd (finite-difference gradient-magnitude boundary loss weighted by
+the body mask), L_ent / L_bal (routing-gate entropy + load-balance losses computed
+from AnatomyRouter.forward's alpha_soft), and L_cls (optional anatomy CE loss,
+ADR-003) are all wired. All λ weights come from cfg.loss.weights (R1).
+
+Routing gate (§5, ADR-003)
+---------------------------
+AnatomyRouter is built in __init__ and stored on self.router. Temperature tau
+is tracked as a plain float buffer self.current_tau, initialized to tau_max.
+RouterTauScheduleCallback (train_thermobridge.py) calls
+  lit_model.current_tau = lit_model.router.tau_schedule(epoch)
+every epoch, which LitBridge reads before each forward pass.
+alpha_soft is computed from compute_alpha_soft() so L_ent/L_bal/L_cls can use
+it; the sparse alpha from forward() is what the denoiser actually receives.
 
 Dual-direction batching (ADR-014)
 ----------------------------------
@@ -72,6 +75,8 @@ if str(_REPO_ROOT) not in sys.path:
 
 from src.models.bridge import I2SBProcess
 from src.models.build import build_denoiser
+from src.models.anisotropic_op import compute_3d_gradients
+from src.models.routing import AnatomyRouter, RoutingLoss
 from src.physics.radon import FastRadonProjector, RadonConsistencyLoss
 from src.training.evaluate import sliding_window_predict
 from src.training.metrics import compute_all_metrics
@@ -82,6 +87,16 @@ from src.data.preprocess import invert_ct_to_hu, invert_mr
 _MR_IDX = 0
 _CT_IDX = 1
 _CBCT_IDX = 2  # not yet produced by the dataset (Task2/CBCT not wired), but L_rad must honor it
+
+# Maps direction_id -> (m_s, m_t) for all supported translation directions.
+# Used by _BridgePredictor.predict and any future inference code that converts
+# an integer direction_id into the source/target modality pair.
+_DIRECTION_TO_MODALITIES: dict[int, tuple[int, int]] = {
+    0: (_MR_IDX,   _CT_IDX),    # MR -> CT   (primary SynthRAD2023 direction)
+    1: (_CT_IDX,   _MR_IDX),    # CT -> MR
+    2: (_CBCT_IDX, _CT_IDX),    # CBCT -> CT (SynthRAD2025)
+    3: (_CT_IDX,   _CBCT_IDX),  # CT -> CBCT
+}
 
 
 # ---------------------------------------------------------------------------
@@ -102,10 +117,12 @@ class _BridgePredictor:
         dev = next(mod.denoiser.parameters()).device
         x_T = torch.from_numpy(source_norm[np.newaxis, np.newaxis]).float().to(dev)
 
-        m_s_val, m_t_val = (_MR_IDX, _CT_IDX) if direction_id == 0 else (_CT_IDX, _MR_IDX)
+        m_s_val, m_t_val = _DIRECTION_TO_MODALITIES.get(direction_id, (_MR_IDX, _CT_IDX))
         m_s = torch.tensor([m_s_val], dtype=torch.long, device=dev)
         m_t = torch.tensor([m_t_val], dtype=torch.long, device=dev)
-        alpha = mod._make_alpha(1, dev)
+        # alpha placeholder — denoiser.router recomputes internally when installed
+        A = mod.router.num_anatomies if mod.router is not None else mod._num_anatomies
+        alpha = torch.full((1, A), 1.0 / A, device=dev)
 
         num_steps = int(mod.cfg.model.bridge.num_steps)
         with torch.no_grad():
@@ -145,7 +162,7 @@ class LitBridge(pl.LightningModule):
         self.splits_path        = splits_path
         self.manifest_2025_path = manifest_2025_path
 
-        # Build model + bridge process
+        # Build denoiser + bridge process
         self.denoiser = build_denoiser(cfg)
         self.bridge = I2SBProcess(
             max_variance_s=float(cfg.model.bridge.max_variance_s),
@@ -154,19 +171,38 @@ class LitBridge(pl.LightningModule):
         )
         self.radon_loss = RadonConsistencyLoss(FastRadonProjector())
 
+        # §5 AnatomyRouter — built here so LitBridge owns all parameters.
+        # train_thermobridge.py's build_model() then calls
+        # denoiser.set_adapters(lit.router, adapter_blocks) to wire the same
+        # router object into the denoiser's per-block adapter slots.
+        routing_cfg = cfg.model.routing
+        self.router = AnatomyRouter(
+            in_channels=1,
+            hidden_dim=int(cfg.model.denoiser.hidden_dim),
+            num_anatomies=int(routing_cfg.num_anatomies),
+            top_k=int(routing_cfg.top_k),
+            adapter_rank=int(routing_cfg.adapter_rank),
+            tau_max=float(routing_cfg.tau_max),
+            tau_min=float(routing_cfg.tau_min),
+            total_epochs=int(cfg.training.max_epochs),
+        )
+        # current_tau: plain float, updated each epoch by RouterTauScheduleCallback.
+        # Stored as a plain attribute (not nn.Parameter/buffer) so it doesn't
+        # appear in state_dict or affect pickling.
+        self.current_tau: float = float(routing_cfg.tau_max)
+
         # §7 loss weights (R1 — from config, explicit, never hardcoded)
         weights = dict(cfg.loss.weights)
-        self.w_rec = float(weights.get("rec", 1.0))
+        self.w_rec  = float(weights.get("rec",  1.0))
         self.w_ssim = float(weights.get("ssim", 0.0))
-        self.w_bnd = float(weights.get("bnd", 0.0))
-        self.w_rad = float(weights.get("rad", 0.0))
-        self.w_ent = float(weights.get("ent", 0.0))
-        self.w_bal = float(weights.get("bal", 0.0))
-        self.w_cls = float(weights.get("cls", 0.0))
+        self.w_bnd  = float(weights.get("bnd",  0.0))
+        self.w_rad  = float(weights.get("rad",  0.0))
+        self.w_ent  = float(weights.get("ent",  0.0))
+        self.w_bal  = float(weights.get("bal",  0.0))
+        self.w_cls  = float(weights.get("cls",  0.0))
 
-        # Anatomy count for the alpha placeholder (§5 routing gate not built
-        # until Chunk 9 — alpha is a uniform pass-through, see _make_alpha).
-        self._num_anatomies = len(cfg.data.all_anatomies)
+        # Fallback anatomy count (used only when router is None)
+        self._num_anatomies = int(routing_cfg.num_anatomies)
 
         # Lazy-loaded manifests / splits for val loop
         self._manifest:      dict | None = None  # SynthRAD2023
@@ -195,7 +231,7 @@ class LitBridge(pl.LightningModule):
         return self._manifest, self._val_ids
 
     def _make_alpha(self, batch_size: int, device: torch.device) -> torch.Tensor:
-        """Uniform routing-weight placeholder (§5 gate not built until Chunk 9)."""
+        """Uniform routing-weight fallback (used only when self.router is None)."""
         A = self._num_anatomies
         return torch.full((batch_size, A), 1.0 / A, device=device)
 
@@ -213,65 +249,106 @@ class LitBridge(pl.LightningModule):
     ) -> torch.Tensor:
         return self.denoiser(x_t, t, m_s, m_t, alpha)
 
-    # ------------------------------------------------------------------
-    # Training step
-    # ------------------------------------------------------------------
-
     def training_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
-        source = batch["source"]        # (B, 1, Z, Y, X) — x_T (bridge start)
-        target = batch["target"]        # (B, 1, Z, Y, X) — x_0 (bridge end)
-        dir_id = batch["direction_id"]  # (B,) 0=MR->CT, 1=CT->MR
+        source = batch["source"]   # (B, 1, Z, Y, X) — x_T (bridge start)
+        target = batch["target"]   # (B, 1, Z, Y, X) — x_0 (bridge end)
 
         x_T, x_0 = source, target
-        # direction_id 0=MR->CT, 1=CT->MR coincides exactly with (_MR_IDX, _CT_IDX)=(0,1)
-        m_s = dir_id.long()
-        m_t = (1 - dir_id).long()
-
         B = x_0.shape[0]
-        t = torch.rand(B, device=x_0.device)
-        alpha = self._make_alpha(B, x_0.device)
 
-        # Sample x_t and predict x_hat_0 directly (rather than calling the
-        # opaque I2SBProcess.bridge_loss) so x_hat_0 is available for L_rad
-        # below without a second denoiser forward pass. This replicates
-        # bridge_loss's own math exactly (see src/models/bridge.py).
+        # ── m_s / m_t from batch (correct for 3 modalities: mr=0, ct=1, cbct=2)
+        # Datasets populate these keys directly; fall back to direction_id
+        # convention only when they are absent (legacy single-modality batches).
+        if "m_s" in batch and "m_t" in batch:
+            m_s = batch["m_s"].long()
+            m_t = batch["m_t"].long()
+        else:
+            dir_id = batch["direction_id"]
+            m_s = dir_id.long()
+            m_t = (1 - dir_id).long()
+
+        t = torch.rand(B, device=x_0.device)
+
+        # ── Routing gate (§5): compute alpha_soft for losses, alpha_sparse
+        # for the denoiser.  self.router.tau is set to self.current_tau before
+        # forward so the temperature schedule is respected without a second
+        # call.  denoiser.forward() re-runs router(x_T) internally when a
+        # router is installed — we call compute_alpha_soft() separately here
+        # so we can access alpha_soft for L_ent / L_bal / L_cls, then let
+        # the denoiser's own internal router call produce alpha_sparse.
+        if self.router is not None:
+            self.router.tau = self.current_tau
+            alpha_soft = self.router.compute_alpha_soft(x_T)   # (B, A) — for losses
+            alpha_sparse, _S = self.router(x_T)                # (B, A) — for denoiser
+        else:
+            alpha_soft  = self._make_alpha(B, x_0.device)
+            alpha_sparse = alpha_soft
+
+        # ── Bridge forward + denoiser prediction
+        # Expand x_t from the bridge marginal, predict x_hat_0 in one pass.
+        # x_hat_0 is reused below by L_bnd without a second forward pass.
         x_t, _noise = self.bridge.forward_marginal(x_0, x_T, t)
-        x_hat_0 = self.denoiser(x_t, t, m_s, m_t, alpha)
+        x_hat_0 = self.denoiser(x_t, t, m_s, m_t, alpha_sparse)
         w_t = self.bridge.time_weighting(t)
         l1_per_sample = (x_hat_0 - x_0).abs().flatten(1).mean(dim=1)
         loss_rec = (w_t * l1_per_sample).mean()
 
-        # L_ssim (IC3-derived lesson — Chunk V4): 1-SSIM on x_hat_0 vs x_0.
+        # ── L_ssim (IC3-derived — Chunk V4): 1 − SSIM on x_hat_0 vs x_0.
         loss_ssim = 1.0 - ssim_metric(x_hat_0.float(), x_0.float(), data_range=2.0)
 
-        # L_rad (§7, ADR-011, Chunk 10): only for CT/CBCT targets.
+        # ── L_rad (§7, ADR-011, Chunk 10): only for CT/CBCT targets.
         is_ct_or_cbct = ((m_t == _CT_IDX) | (m_t == _CBCT_IDX)).float()
         loss_rad = self.radon_loss(x_hat_0, x_0, is_ct_or_cbct)
 
-        # Terms not yet implementable (§7 — see module docstring): logged at
-        # their true zero contribution, weights still read from config.
-        zero = torch.zeros((), device=x_0.device)
-        loss_bnd, loss_ent, loss_bal, loss_cls = zero, zero, zero, zero
+        # ── L_bnd (§7): edge-weighted L1 on gradient maps of x_hat_0 vs x_0.
+        # compute_3d_gradients() returns (B, 3, D, H, W) forward differences along
+        # Z, Y, X — the same finite-difference kernel as AnisotropicDiffusionOp
+        # (single implementation in anisotropic_op.py, no code duplication).
+        # Edge weight: GT gradient magnitude, normalised per batch so the weight
+        # focuses the loss on bone/soft-tissue boundaries without dominating flat
+        # regions (detached — weight is a structural prior, not learned here).
+        grad_hat = compute_3d_gradients(x_hat_0)          # (B, 3, D, H, W)
+        grad_gt  = compute_3d_gradients(x_0)
+        edge_weight = grad_gt.norm(dim=1, keepdim=True).detach()   # (B, 1, D, H, W)
+        edge_weight = edge_weight / (edge_weight.mean() + 1e-8)    # normalize
+        loss_bnd = (edge_weight * (grad_hat - grad_gt).abs()).mean()
+
+        # ── L_ent / L_bal (§7): routing-gate load-balance and entropy losses.
+        loss_ent = RoutingLoss.entropy_loss(alpha_soft)
+        loss_bal = RoutingLoss.balance_loss(alpha_soft)
+
+        # ── L_cls (§7, ADR-003): optional anatomy cross-entropy supervision.
+        # Skip (contribute 0) when anatomy labels are absent in the batch.
+        if self.w_cls > 0.0 and "anatomy" in batch:
+            anatomy_labels = batch["anatomy"]
+            # anatomy may arrive as int tensor or nested list; normalise to 1-D long
+            if not isinstance(anatomy_labels, torch.Tensor):
+                anatomy_labels = torch.tensor(anatomy_labels, dtype=torch.long, device=x_0.device)
+            anatomy_labels = anatomy_labels.long().to(x_0.device)
+            loss_cls = RoutingLoss.cls_loss(alpha_soft, anatomy_labels)
+        else:
+            loss_cls = torch.zeros((), device=x_0.device)
 
         loss_total = (
-            self.w_rec * loss_rec
+            self.w_rec  * loss_rec
             + self.w_ssim * loss_ssim
-            + self.w_bnd * loss_bnd
-            + self.w_rad * loss_rad
-            + self.w_ent * loss_ent
-            + self.w_bal * loss_bal
-            + self.w_cls * loss_cls
+            + self.w_bnd  * loss_bnd
+            + self.w_rad  * loss_rad
+            + self.w_ent  * loss_ent
+            + self.w_bal  * loss_bal
+            + self.w_cls  * loss_cls
         )
 
-        self.log("train/loss_rec",   loss_rec,   on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
-        self.log("train/loss_ssim",  loss_ssim,  on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
-        self.log("train/loss_bnd",   loss_bnd,   on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
-        self.log("train/loss_rad",   loss_rad,   on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
-        self.log("train/loss_ent",   loss_ent,   on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
-        self.log("train/loss_bal",   loss_bal,   on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
-        self.log("train/loss_cls",   loss_cls,   on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
-        self.log("train/loss_bridge", loss_rec,  on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
-        self.log("train/loss_total", loss_total, on_step=True, on_epoch=True, prog_bar=True,  sync_dist=True)
+        self.log("train/loss_rec",    loss_rec,    on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
+        self.log("train/loss_ssim",   loss_ssim,   on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
+        self.log("train/loss_bnd",    loss_bnd,    on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
+        self.log("train/loss_rad",    loss_rad,    on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
+        self.log("train/loss_ent",    loss_ent,    on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
+        self.log("train/loss_bal",    loss_bal,    on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
+        self.log("train/loss_cls",    loss_cls,    on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
+        self.log("train/loss_bridge", loss_rec,    on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
+        self.log("train/loss_total",  loss_total,  on_step=True, on_epoch=True, prog_bar=True,  sync_dist=True)
+        self.log("train/tau",         self.current_tau, on_step=False, on_epoch=True, prog_bar=False)
 
         return loss_total
 
@@ -289,11 +366,17 @@ class LitBridge(pl.LightningModule):
         """
         source = batch["source"]        # x_T (bridge start)
         target = batch["target"]        # x_0 (bridge end)
-        dir_id = batch["direction_id"]
 
         x_T, x_0 = source, target
-        m_s = dir_id.long()
-        m_t = (1 - dir_id).long()
+        # Use batch m_s/m_t when available (3-modality support), fall back to
+        # direction_id convention for legacy 2-modality batches.
+        if "m_s" in batch and "m_t" in batch:
+            m_s = batch["m_s"].long()
+            m_t = batch["m_t"].long()
+        else:
+            dir_id = batch["direction_id"]
+            m_s = dir_id.long()
+            m_t = (1 - dir_id).long()
 
         B = x_0.shape[0]
         t = torch.rand(B, device=x_0.device)
