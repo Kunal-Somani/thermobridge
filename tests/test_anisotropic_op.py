@@ -7,6 +7,7 @@ import torch
 from src.models.anisotropic_op import (
     AnisotropicDiffusionOp,
     ConvLocalMixer,
+    compute_3d_gradients,
     perona_malik_conductance,
 )
 from src.models.denoiser import ThermoBridgeDenoiser
@@ -132,3 +133,39 @@ def test_conv_local_mixer_shape():
     x = torch.randn(2, 8, 10, 10, 10)
     y = mixer(x)
     assert y.shape == x.shape
+
+
+# ---------------------------------------------------------------------------
+# compute_3d_gradients / spatial_gradients
+# ---------------------------------------------------------------------------
+
+
+def test_compute_3d_gradients_shape():
+    """Output channel count must be 3*C and spatial dims must be preserved."""
+    x = torch.randn(2, 1, 16, 16, 16)
+    g = compute_3d_gradients(x)
+    assert g.shape == (2, 3, 16, 16, 16), f"expected (2,3,16,16,16), got {tuple(g.shape)}"
+
+
+def test_compute_3d_gradients_differentiable():
+    """Gradients must flow back to the input."""
+    x = torch.randn(2, 1, 8, 8, 8, requires_grad=True)
+    g = compute_3d_gradients(x)
+    g.sum().backward()
+    assert x.grad is not None, "x.grad is None — compute_3d_gradients is not differentiable"
+
+
+def test_spatial_gradients_matches_module_fn():
+    """AnisotropicDiffusionOp.spatial_gradients must equal compute_3d_gradients."""
+    op = _make_op(num_channels=1)
+    x = torch.randn(2, 1, 8, 8, 8)
+    assert torch.allclose(op.spatial_gradients(x), compute_3d_gradients(x))
+
+
+def test_compute_3d_gradients_boundary_zero():
+    """The last slice along each spatial dim must be zero (no-flux BC)."""
+    x = torch.randn(1, 1, 8, 8, 8)
+    g = compute_3d_gradients(x)  # (1, 3, 8, 8, 8) — channels: dz, dy, dx
+    assert g[:, 0, -1, :, :].abs().max().item() == 0.0, "dz boundary not zeroed"
+    assert g[:, 1, :, -1, :].abs().max().item() == 0.0, "dy boundary not zeroed"
+    assert g[:, 2, :, :, -1].abs().max().item() == 0.0, "dx boundary not zeroed"

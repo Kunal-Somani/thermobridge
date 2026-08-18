@@ -54,16 +54,33 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--out-dir", type=Path, default=_REPO_ROOT / "outputs" / "runs", help="Root directory for run outputs.")
     p.add_argument("--experiment-name", type=str, default="thermobridge", help="Experiment/run name (subdirectory of --out-dir).")
     p.add_argument("--resume", type=Path, default=None, help="Checkpoint path to resume from.")
+    p.add_argument("--num-workers", type=int, default=None,
+                   help="Override training.num_workers from config (0 = single-process, useful for debugging hangs).")
+    p.add_argument("--max-epochs", type=int, default=None,
+                   help="Override training.max_epochs from config.")
     return p.parse_args()
 
 
 class RouterTauScheduleCallback(Callback):
-    """Anneals AnatomyRouter.tau each epoch per its own tau_schedule (§5)."""
+    """Anneals AnatomyRouter.tau each epoch per tau_schedule (§5).
+
+    Updates both lit_module.current_tau (read by training_step for L_ent/bal)
+    and router.tau on the denoiser (used if denoiser.forward() reads it
+    directly).  Both attributes point to the same AnatomyRouter object after
+    build_model() calls denoiser.set_adapters(lit.router, ...), so the
+    assignments are redundant but safe.
+    """
 
     def on_train_epoch_start(self, trainer: pl.Trainer, pl_module: LitBridge) -> None:
-        router = pl_module.denoiser.router
+        router = pl_module.router  # AnatomyRouter owned by LitBridge
         if router is not None:
-            router.tau = router.tau_schedule(trainer.current_epoch)
+            new_tau = router.tau_schedule(trainer.current_epoch)
+            router.tau = new_tau
+            pl_module.current_tau = new_tau
+            # Also sync to denoiser.router in case it's a different object
+            # (shouldn't be after set_adapters, but guard for safety)
+            if pl_module.denoiser.router is not None and pl_module.denoiser.router is not router:
+                pl_module.denoiser.router.tau = new_tau
 
 
 def _git_commit_hash() -> str:
@@ -88,17 +105,11 @@ def build_model(cfg, args: argparse.Namespace) -> LitBridge:
     denoiser = lit.denoiser
 
     # --- Anatomy routing (§5) ---
+    # Reuse the router that LitBridge.__init__ already built (lit.router) so
+    # that lit_module.router and denoiser.router are the same object — tau
+    # updates and gradient flow are consistent.
     routing_cfg = cfg.model.routing
-    router = AnatomyRouter(
-        in_channels=1,
-        hidden_dim=int(cfg.model.denoiser.hidden_dim),
-        num_anatomies=int(routing_cfg.num_anatomies),
-        top_k=int(routing_cfg.top_k),
-        adapter_rank=int(routing_cfg.adapter_rank),
-        tau_max=float(routing_cfg.tau_max),
-        tau_min=float(routing_cfg.tau_min),
-        total_epochs=int(cfg.training.max_epochs),
-    )
+    router = lit.router  # already constructed with correct hyperparams
     adapter_blocks = [
         RoutedAdapterBlock(
             dim=int(cfg.model.denoiser.hidden_dim),
@@ -131,11 +142,19 @@ def main() -> None:
     args = parse_args()
     cfg = load_config(args.config)
 
+    # Apply CLI overrides BEFORE any DataModule or Trainer construction.
+    # OmegaConf.update() keeps the config object structured (not plain dict)
+    # so all downstream code that reads cfg.training.* still works.
+    from omegaconf import OmegaConf
+    if args.num_workers is not None:
+        OmegaConf.update(cfg, "training.num_workers", args.num_workers, merge=True)
+    if args.max_epochs is not None:
+        OmegaConf.update(cfg, "training.max_epochs", args.max_epochs, merge=True)
+
     pl.seed_everything(int(cfg.seed), workers=True)
 
     print(f"Git commit: {_git_commit_hash()}")
-    from omegaconf import OmegaConf
-    print(f"Experiment: {args.experiment_name} | patch={list(cfg.patch.size)} | batch={cfg.training.batch_size} | epochs={cfg.training.max_epochs}")
+    print(f"Experiment: {args.experiment_name} | patch={list(cfg.patch.size)} | batch={cfg.training.batch_size} | epochs={cfg.training.max_epochs} | num_workers={cfg.training.num_workers}")
 
     run_dir = args.out_dir / args.experiment_name
     run_dir.mkdir(parents=True, exist_ok=True)
