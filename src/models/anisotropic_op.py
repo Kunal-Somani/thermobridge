@@ -52,6 +52,28 @@ def _directional_diff(I: torch.Tensor, dim: int, forward: bool) -> torch.Tensor:
     return diff
 
 
+def compute_3d_gradients(x: torch.Tensor) -> torch.Tensor:
+    """Forward finite-difference 3-D gradient map, no learnable parameters.
+
+    Reuses the same ``_directional_diff`` kernel as ``AnisotropicDiffusionOp``
+    so there is exactly one copy of the finite-difference logic in the codebase.
+
+    Args:
+        x: ``(B, C, D, H, W)`` float tensor.
+
+    Returns:
+        ``(B, 3*C, D, H, W)`` tensor whose channel groups are the forward
+        differences along dims 2 (D / Z), 3 (H / Y), 4 (W / X) respectively.
+        Boundary voxels are zeroed (no-flux / Neumann BC, matching the
+        diffusion operator's own convention).
+
+    This function is fully differentiable — all ops are standard torch ops so
+    gradients flow back to ``x``.
+    """
+    slices = [_directional_diff(x, dim=d, forward=True) for d in (2, 3, 4)]
+    return torch.cat(slices, dim=1)  # (B, 3*C, D, H, W)
+
+
 class AnisotropicDiffusionOp(nn.Module):
     """Perona-Malik 3D anisotropic diffusion, num_steps explicit Euler steps (§6).
 
@@ -99,6 +121,20 @@ class AnisotropicDiffusionOp(nn.Module):
                     divergence = divergence + conductance * diff
             I = I + dt * divergence
         return I
+
+    def spatial_gradients(self, x: torch.Tensor) -> torch.Tensor:
+        """Return concatenated (dz, dy, dx) forward-difference gradient maps.
+
+        Delegates to the module-level :func:`compute_3d_gradients` so that
+        the finite-difference kernel lives in exactly one place.
+
+        Args:
+            x: ``(B, C, D, H, W)``.
+
+        Returns:
+            ``(B, 3*C, D, H, W)`` — same convention as :func:`compute_3d_gradients`.
+        """
+        return compute_3d_gradients(x)
 
 
 class ConvLocalMixer(nn.Module):
