@@ -373,7 +373,7 @@ class CombinedDataModule(pl.LightningDataModule):
             # 'fork' can deadlock if the parent holds open file handles
             # (e.g., from json.load in setup()) or if OmegaConf's C++
             # extension is loaded.
-            kwargs["multiprocessing_context"] = "spawn"
+            kwargs["multiprocessing_context"] = "fork"
             kwargs["prefetch_factor"] = 2
         return DataLoader(dataset, **kwargs)
 

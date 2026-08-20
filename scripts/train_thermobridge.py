@@ -206,6 +206,7 @@ def main() -> None:
         gradient_clip_val=1.0,
         log_every_n_steps=10,
         check_val_every_n_epoch=5,
+        num_sanity_val_steps=0,
         callbacks=callbacks,
         logger=logger,
     )
