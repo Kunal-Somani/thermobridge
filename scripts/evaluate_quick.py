@@ -45,6 +45,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from scripts.train_thermobridge import build_model
 from src.data.preprocess import invert_ct_to_hu, invert_mr
+from src.training.lit_baseline import LitBaseline
 from src.training.lit_bridge import LitBridge, _CBCT_IDX, _CT_IDX, _MR_IDX
 from src.training.metrics import compute_all_metrics
 from src.utils.config import load_config
@@ -71,6 +72,9 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--config", required=True, type=Path)
     p.add_argument("--checkpoint", required=True, type=Path)
+    p.add_argument("--model-type", default="thermobridge", choices=["thermobridge", "unet"],
+                   help="thermobridge (default): LitBridge + reverse_sample diffusion. "
+                        "unet: LitBaseline, direct UNet3D forward pass (no bridge/diffusion).")
     p.add_argument("--manifest-2023", type=Path,
                    default=_REPO_ROOT / "outputs" / "preprocessed" / "manifest.json")
     p.add_argument("--manifest-2025", type=Path,
@@ -121,6 +125,32 @@ def predict_patch(
             model.denoiser, x_T, m_s, m_t, alpha, num_steps=NUM_STEPS
         )
     return x_hat_0[0, 0].float().cpu().numpy()
+
+
+class _UNetPredictor:
+    """Direct UNet3D forward pass — no bridge reverse_sample, no diffusion.
+
+    Mirrors _BridgePredictor (src/training/lit_bridge.py)'s role as a thin
+    model wrapper, but calls model.model(...) directly instead of
+    bridge.reverse_sample.
+    """
+
+    def __init__(self, model: LitBaseline) -> None:
+        self.model = model
+
+    def predict(
+        self,
+        source_norm: np.ndarray,
+        m_s_val: int,
+        m_t_val: int,
+        device: torch.device,
+    ) -> np.ndarray:
+        src_t = torch.from_numpy(source_norm[np.newaxis, np.newaxis]).float().to(device)
+        direction_id_val = 0 if m_t_val == _CT_IDX else 1  # 0 = ->CT, 1 = CT->source
+        dir_t = torch.tensor([direction_id_val], dtype=torch.long, device=device)
+        with torch.no_grad():
+            out = self.model.model(src_t, dir_t)
+        return out[0, 0].float().cpu().numpy()
 
 
 # ---------------------------------------------------------------------------
@@ -177,11 +207,20 @@ def main() -> None:
     with open(args.splits_2025) as f:
         splits_2025 = json.load(f)
 
-    # ── Build the full model (denoiser + router/adapters + anisotropic op +
-    # bridge), same assembly as train_thermobridge.py's build_model(). This
-    # reads hidden_dim from cfg.model.denoiser.hidden_dim for the router —
-    # NOT a hardcoded value — since build_model() already does so.
-    model = build_model(cfg, args)
+    if args.model_type == "unet":
+        # ── Build the LitBaseline UNet3D model (no bridge, no router/adapters).
+        model = LitBaseline(
+            cfg,
+            manifest_path=args.manifest_2023,
+            splits_path=args.splits_2023,
+            manifest_2025_path=args.manifest_2025,
+        )
+    else:
+        # ── Build the full model (denoiser + router/adapters + anisotropic op +
+        # bridge), same assembly as train_thermobridge.py's build_model(). This
+        # reads hidden_dim from cfg.model.denoiser.hidden_dim for the router —
+        # NOT a hardcoded value — since build_model() already does so.
+        model = build_model(cfg, args)
 
     print(f"Loading checkpoint (map_location='cpu'): {args.checkpoint}")
     ckpt = torch.load(str(args.checkpoint), map_location="cpu")
@@ -194,7 +233,16 @@ def main() -> None:
 
     model = model.cuda()
     model.eval()
-    device = next(model.denoiser.parameters()).device
+    if args.model_type == "unet":
+        device = next(model.model.parameters()).device
+    else:
+        device = next(model.denoiser.parameters()).device
+
+    if args.model_type == "unet":
+        predictor = _UNetPredictor(model)
+        predict_fn = lambda src, m_s, m_t: predictor.predict(src, m_s, m_t, device)
+    else:
+        predict_fn = lambda src, m_s, m_t: predict_patch(model, src, m_s, m_t, device)
 
     # ── Gather + limit patients per anatomy ──────────────────────────────
     candidates = gather_patients(manifest_2023, splits_2023, manifest_2025, splits_2025, args.direction)
@@ -234,7 +282,7 @@ def main() -> None:
             mask_crop   = center_crop(mask_full,   PATCH_SIZE)
 
             # Primary: source -> CT, HU-inverted, in-mask MAE (R2)
-            pred_norm = predict_patch(model, source_crop, m_src, _CT_IDX, device)
+            pred_norm = predict_fn(source_crop, m_src, _CT_IDX)
             pred_hu   = invert_ct_to_hu(pred_norm,  ct_params)
             target_hu = invert_ct_to_hu(target_crop, ct_params)
             result    = compute_all_metrics(pred_hu, target_hu, mask_crop)
@@ -246,7 +294,7 @@ def main() -> None:
             })
 
             # Also evaluate CT -> source direction (normalized MAE/PSNR/SSIM)
-            pred_norm_rev = predict_patch(model, target_crop, _CT_IDX, m_src, device)
+            pred_norm_rev = predict_fn(target_crop, _CT_IDX, m_src)
             if src_params:
                 pred_orig   = invert_mr(pred_norm_rev, src_params)
                 target_orig = invert_mr(source_crop,   src_params)
@@ -262,7 +310,7 @@ def main() -> None:
 
     # ── Summary: primary direction, per anatomy + overall, vs baselines ──
     print("\n" + "=" * 72)
-    print(f"  QUICK EVAL SUMMARY — {args.direction} — center-crop MAE-HU (mean ± std)")
+    print(f"  QUICK EVAL SUMMARY — model_type={args.model_type} — {args.direction} — center-crop MAE-HU (mean ± std)")
     print("=" * 72)
 
     for anatomy in sorted({r["anatomy"] for r in primary_rows}):
@@ -275,9 +323,11 @@ def main() -> None:
         print(f"  {'ALL':<8}  MAE-HU = {np.mean(all_mae):>8.2f} ± {np.std(all_mae):<6.2f}  n={len(all_mae)}")
 
         print("\n  vs. baselines:")
-        print(f"    U-Net baseline    : {BASELINE_UNET_MAE_HU:>8.2f} HU")
+        if args.model_type != "unet":
+            print(f"    U-Net baseline    : {BASELINE_UNET_MAE_HU:>8.2f} HU")
         print(f"    mean-CT floor     : {BASELINE_MEAN_CT_MAE_HU:>8.2f} HU")
-        print(f"    ThermoBridge (here): {np.mean(all_mae):>8.2f} HU")
+        model_label = "ThermoBridge" if args.model_type == "thermobridge" else "U-Net"
+        print(f"    {model_label} (here): {np.mean(all_mae):>8.2f} HU")
     print("=" * 72)
 
     # ── Summary: reverse direction (CT -> source), normalized ────────────
