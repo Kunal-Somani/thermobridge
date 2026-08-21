@@ -266,7 +266,7 @@ class LitBaseline(pl.LightningModule):
             pred_hu   = invert_ct_to_hu(pred_norm, ct_params)
             target_hu = invert_ct_to_hu(target_t,  ct_params)
             result    = compute_all_metrics(pred_hu, target_hu, mask_np)
-        elif mr_params:   # CT→MR: report on restored MR/CBCT scale
+        elif mr_params and "p1" in mr_params:   # CT→MR: report on restored MR/CBCT scale
             pred_mr   = invert_mr(pred_norm, mr_params)
             target_mr = invert_mr(target_t,  mr_params)
             result    = compute_all_metrics(pred_mr, target_mr, mask_np)
