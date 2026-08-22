@@ -1,0 +1,240 @@
+# =============================================================================
+# ThermoBridge — Default Configuration
+# =============================================================================
+# Every hyperparameter, loss term, and normalization constant lives here.
+# Rule 1 (PAPER==CODE): nothing hidden or undocumented.
+# Rule 8 (Ask before inventing): EDA-dependent values are null with TODO.
+
+project:
+  name: "ThermoBridge"
+  version: "0.1.0"
+
+seed: 42 # Global seed for reproducibility (Rule 6)
+
+# ---------------------------------------------------------------------------
+# Data
+# ---------------------------------------------------------------------------
+data:
+  root_dir: "data/synthrad2023/Task1"
+  anatomies: ["brain", "pelvis"]
+  # Patient ID format: 1[B|P][A|B|C][NNN]
+  # Brain centers: A(60), B(60), C(60) = 180
+  # Pelvis centers: A(120), C(60) = 180 (no center B)
+
+  split:
+    scheme: patient_level
+    seed: 42 # Deterministic patient-level split (Rule 3)
+    # Fractions must sum to 1.0
+    train: 0.7
+    val: 0.15
+    test: 0.15
+    # Stratify by (anatomy, center) to ensure balanced representation
+    stratify_by: ["anatomy", "center"]
+
+  # SynthRAD2025 — multi-modality, multi-anatomy (ADR-012)
+  synthrad2025:
+    task1_dir: "data/synthrad2025/Task1_data"   # MRI-CT: HN, TH, AB — 890 pairs
+    task2_dir: "data/synthrad2025/Task2_data"   # CBCT-CT: HN, TH, AB — 1472 pairs
+    anatomies: ["HN", "TH", "AB"]
+    modalities: ["mr", "ct", "cbct"]
+    # Use challenge pre-split (65/10/25) — do not re-split (G3)
+    use_challenge_split: true
+    # Per-dataset (SynthRAD2025-only) index maps. The AUTHORITATIVE combined
+    # mapping used by CombinedDataModule/the routing gate is data.combined below.
+    anatomy_to_idx: { HN: 0, TH: 1, AB: 2 }
+    modality_to_idx: { mr: 0, ct: 1, cbct: 2 }
+    cbct:
+      clip_hu_min: null   # TODO: pin from EDA (Chunk N1); fallback [-1000, 3071] until pinned
+      clip_hu_max: null   # TODO: pin from EDA (Chunk N1)
+      normalization: "min_max"
+    hn_ct:
+      clip_hu_min: null   # TODO: pin from EDA — may differ from brain [-1024,2000]; fallback [-1024,2000]
+      clip_hu_max: null
+    th_ct:
+      clip_hu_min: null   # TODO: pin from EDA
+      clip_hu_max: null
+    ab_ct:
+      clip_hu_min: null   # TODO: pin from EDA
+      clip_hu_max: null
+
+  # Combined anatomy list (SynthRAD2023 + SynthRAD2025)
+  all_anatomies: ["brain", "pelvis", "HN", "TH", "AB"]
+  all_modalities: ["mr", "ct", "cbct"]
+
+  # Authoritative combined index mapping (Chunk N1) — used by
+  # CombinedDataModule and (after wiring) the routing gate's num_anatomies=5.
+  combined:
+    anatomy_to_idx: { brain: 0, pelvis: 1, HN: 2, TH: 3, AB: 4 }
+    modality_to_idx: { MRI: 0, CT: 1, CBCT: 2 }
+
+# ---------------------------------------------------------------------------
+# Preprocessing
+# ---------------------------------------------------------------------------
+preprocessing:
+  # TODO: pin after EDA — requires inspecting actual voxel spacings across centers
+  target_spacing_mm: [1.0, 1.0, 1.5] # e.g., [1.0, 1.0, 1.0]
+
+  ct:
+    # TODO: pin after EDA — requires inspecting HU histograms across anatomies
+    clip_hu_min: -1024 # e.g., -1024
+    clip_hu_max: 2000 # e.g., 3000
+    # Normalization strategy for CT (applied after clipping)
+    # Must store min/max or mean/std to invert exactly (Rule 2)
+    normalization: "min_max" # options: min_max, z_score
+
+  mr:
+    # TODO: pin after EDA — MR intensities are arbitrary; need per-volume strategy
+    normalization: percentile_99 # e.g., "percentile_99" or "z_score"
+
+# ---------------------------------------------------------------------------
+# Patch pipeline (§5.4 of spec)
+# ---------------------------------------------------------------------------
+patch:
+  samples_per_volume: 2   # was 8 — reduces steps per epoch 4x, GPU stays utilized
+  # TODO: pin after GPU VRAM profiling (spec says 96³ or 128³)
+  size: [96, 96, 96]
+  # Overlap fraction for sliding-window inference
+  inference_overlap: 0.5
+  # Foreground sampling: fraction of patches that must contain foreground
+  foreground_fraction: 0.8
+  # Foreground bias: if true, prioritize foreground voxels during sampling
+  foreground_bias: true
+
+# ---------------------------------------------------------------------------
+# Model
+# ---------------------------------------------------------------------------
+model:
+  # --- Image-to-Image Schrödinger Bridge / I2SB (§3, ADR-013) ---
+  bridge:
+    # Max variance hyperparameter: sigma_t^2 = 2*s*t_bar*(1-t_bar) (open value — sweep later)
+    max_variance_s: 1.0
+    # Reverse-sampling steps at inference (open value — sweep {10, 25, 50})
+    num_steps: 25
+    # Time-weighting schedule for L_bridge (open value — sweep constant/snr/cosine)
+    time_weighting: "constant"
+    # Prediction target for the denoiser
+    prediction_target: "x0"   # I2SB uses x0-parameterization (ADR-013); noise pred not used
+
+  # --- Hybrid Transformer Denoiser (§4) ---
+  denoiser:
+    # 3D patchify conv stride/kernel size
+    # patch_size to be re-pinned after VRAM profiling on cloud GPU
+    patch_size: [8, 8, 8]
+    # Transformer dimensions
+    hidden_dim: 512
+    num_layers: 12
+    num_heads: 16
+    # Modality-pair conditioning (§4.1)
+    num_modalities: 3
+    modality_embed_dim: 128
+
+  # --- N-way Sparse Anatomy Routing Gate (§5, CORE CONTRIBUTION A, ADR-003) ---
+  routing:
+    num_anatomies: 5     # brain, pelvis, HN, TH, AB (ADR-010)
+    top_k: 2             # k in {1,2}; default 2
+    adapter_rank: 128    # low-rank bottleneck dim for per-anatomy adapters
+    tau_max: 2.0         # temperature annealing (§5): soft simplex early
+    tau_min: 0.5         # near one-hot late
+    # total_epochs: read from training.max_epochs at runtime
+
+  # --- Learnable 3D Anisotropic Diffusion Operator — local mixer (§6, ADR-004) ---
+  anisotropic_op:
+    use_anisotropic_op: false  # false = use ConvLocalMixer (ablation B1)
+    # Number of explicit Euler steps inside the residual block
+    num_steps: 3
+    # Whether K is per-channel
+    per_channel_k: true
+    # Initial conductance K (learnable; Perona-Malik edge-stopping)
+    init_conductance_k: 1.0
+    # Step size for Euler integration (learnable)
+    init_step_size: 0.1
+
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
+training:
+  # Dual-direction batching (ADR-014): each pair generates forward + backward sample
+  dual_direction_batching: true
+  # Effective samples per volume = 2x when dual_direction_batching=true
+  # Re-profile VRAM after transformer denoiser is built; adjust batch_size accordingly
+  model: unet3d
+  unet_channels: [32, 64, 128, 256]
+  losses: { l1: 1.0, ssim: 0.0 }
+  batch_size: 6 # 3D volumes are large; adjust after VRAM profiling
+  num_workers: 8
+  max_epochs: 200
+  overfit_batches: 0
+  val_every_n_epochs: 5
+  fast_val_patients: 15
+  ckpt_monitor: val/mae_hu
+  ckpt_mode: min
+  optimizer:
+    name: "adamw"
+    lr: 1.0e-4
+    weight_decay: 1.0e-2
+    betas: [0.9, 0.999]
+  scheduler:
+    name: "cosine"
+    warmup_epochs: 5
+    min_lr: 1.0e-6
+  mixed_precision: true # FP16 with FP32-safe handling for gradient ops
+  gradient_clip_norm: 1.0
+  # Directions trained per batch (both for bidirectional)
+  directions: ["mr_to_ct", "ct_to_mr"]
+
+# ---------------------------------------------------------------------------
+# Loss
+# ---------------------------------------------------------------------------
+loss:
+  # Primary loss for the bridge denoiser
+  primary: "mse" # on the prediction target (noise/x0/velocity)
+  # All loss terms and weights documented here (Rule 1: no hidden terms).
+  # §7: L_total = λ_rec·L_rec + λ_bnd·L_bnd + λ_rad·L_rad + λ_ent·L_ent + λ_bal·L_bal + λ_cls·L_cls
+  # rec is implemented (Chunk 7, I2SB bridge). bnd/rad require the anisotropic
+  # operator (§6, Chunk 9b) / Radon projector (not yet built); ent/bal require
+  # the routing gate (§5, Chunk 9); cls is optional (ADR-003). Their weights
+  # are read from config now so nothing is hidden later, but LitBridge logs
+  # them as zero contribution until those components exist.
+  weights:
+    rec: 1.0    # λ_rec
+    ssim: 0.5   # λ_ssim — SSIM loss (1-SSIM), analogous to IC3 combined loss
+    bnd: 0.5    # λ_bnd — boundary loss needs more weight
+    rad: 0.1    # λ_rad — placeholder, sweep later
+    ent: 0.01   # λ_ent
+    bal: 0.01   # λ_bal
+    cls: 0.1    # λ_cls — gate supervision enabled
+
+# ---------------------------------------------------------------------------
+# Evaluation (§9)
+# ---------------------------------------------------------------------------
+evaluation:
+  # All metrics computed INSIDE patient mask only (Rule 2)
+  mask_only: true
+  metrics: ["mae_hu", "psnr", "ssim"]
+  # CT predictions inverse-normalized to HU before MAE (Rule 2)
+  inverse_normalize_ct: true
+  # Report mean ± std across cases + significance test (Rule 4)
+  significance_test: "wilcoxon"
+  # Per-organ breakdown in every table
+  per_organ: true
+
+# ---------------------------------------------------------------------------
+# Output paths (all under outputs/, gitignored)
+# ---------------------------------------------------------------------------
+output:
+  root_dir: "outputs"
+  figures_dir: "outputs/figures"
+  reports_dir: "outputs/reports"
+  checkpoints_dir: "outputs/checkpoints"
+  # Resolved config dumped with every run (Rule 6)
+  log_resolved_config: true
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging:
+  level: "INFO"
+  # Options: csv, tensorboard, wandb
+  backend: "csv"
+  # Figure DPI for publication (spec: ≥300)
+  figure_dpi: 300

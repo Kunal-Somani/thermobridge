@@ -416,13 +416,26 @@ class LitBridge(pl.LightningModule):
         target_np = target[0, 0].cpu().numpy()
         mask_np   = batch["mask"][0, 0].cpu().numpy()
 
-        predictor  = _BridgePredictor(self)
+        # Center-crop single patch for fast val MAE-HU (avoids OOM).
         patch_size = tuple(int(x) for x in self.cfg.patch.size)
-        overlap    = float(self.cfg.patch.inference_overlap)
-
-        pred_norm = sliding_window_predict(
-            predictor, source_np, dir_id, patch_size, overlap, device=self.device
-        )
+        pZ, pY, pX = patch_size
+        Z, Y, X = source_np.shape
+        z0 = max(0,(Z-pZ)//2); y0 = max(0,(Y-pY)//2); x0 = max(0,(X-pX)//2)
+        src_crop = source_np[z0:z0+pZ, y0:y0+pY, x0:x0+pX]
+        tgt_crop = target_np[z0:z0+pZ, y0:y0+pY, x0:x0+pX]
+        mask_np  = mask_np[z0:z0+pZ, y0:y0+pY, x0:x0+pX]
+        dev = next(self.denoiser.parameters()).device
+        src_t = torch.from_numpy(src_crop[None,None]).float().to(dev)
+        m_s_t = torch.tensor([0], dtype=torch.long, device=dev)
+        m_t_t = torch.tensor([1], dtype=torch.long, device=dev)
+        A = self.router.num_anatomies if self.router is not None else self._num_anatomies
+        alpha = torch.full((1,A), 1.0/A, device=dev)
+        with torch.no_grad():
+            pred_norm = self.bridge.reverse_sample(
+                self.denoiser, src_t, m_s_t, m_t_t, alpha,
+                num_steps=int(self.cfg.model.bridge.num_steps)
+            )[0,0].float().cpu().numpy()
+        target_np = tgt_crop
 
         pred_hu   = invert_ct_to_hu(pred_norm, ct_params)
         target_hu = invert_ct_to_hu(target_np, ct_params)
