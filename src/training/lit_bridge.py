@@ -356,13 +356,20 @@ class LitBridge(pl.LightningModule):
     # Validation — cheap patch-based bridge loss (normalized space, R2 N/A)
     # ------------------------------------------------------------------
 
-    def validation_step(self, batch: dict, batch_idx: int) -> None:
-        """One bridge forward pass on the val batch, under no_grad.
+    def on_validation_epoch_start(self) -> None:
+        self._val_mae_hu: list[float] = []
 
-        Mirrors training_step's math exactly, but with no backward pass and
-        no HU inversion — this is a normalized-space proxy loss, logged as
-        val/loss_patch, which ModelCheckpoint monitors. Full HU-metric
-        evaluation lives in evaluate_full() (see module docstring).
+    def validation_step(self, batch: dict, batch_idx: int) -> None:
+        """Sliding-window, HU-inverted validation on the full val volume.
+
+        val batch_size=1, so each batch is one patient. Runs full-volume
+        sliding-window inference via the chunk-5 harness (_BridgePredictor +
+        sliding_window_predict), inverts the CT prediction/target to HU using
+        the manifest's ct_norm_params, and computes MAE-HU inside the body
+        mask for MR->CT patients (direction_id==0). This is what
+        ModelCheckpoint monitors (val/mae_hu). val/loss_patch is also logged
+        (cheap patch-based proxy, same math as training_step) for backward
+        compatibility.
         """
         source = batch["source"]        # x_T (bridge start)
         target = batch["target"]        # x_0 (bridge end)
@@ -389,6 +396,47 @@ class LitBridge(pl.LightningModule):
 
         self.log(
             "val/loss_patch", loss_patch,
+            on_step=False, on_epoch=True, prog_bar=True, sync_dist=True,
+        )
+
+        dir_id = int(batch["direction_id"][0].item())
+        if dir_id != 0:
+            return  # only MR->CT gets the HU-inverted MAE metric
+
+        manifest_2023, _ = self._load_val_data()
+        pid = batch["patient_id"][0]
+        if pid in manifest_2023:
+            ct_params = manifest_2023[pid]["ct_norm_params"]
+        elif self._manifest_2025 is not None and pid in self._manifest_2025:
+            ct_params = self._manifest_2025[pid]["ct_norm_params"]
+        else:
+            return  # patient not found in either manifest — skip HU metric
+
+        source_np = source[0, 0].cpu().numpy()
+        target_np = target[0, 0].cpu().numpy()
+        mask_np   = batch["mask"][0, 0].cpu().numpy()
+
+        predictor  = _BridgePredictor(self)
+        patch_size = tuple(int(x) for x in self.cfg.patch.size)
+        overlap    = float(self.cfg.patch.inference_overlap)
+
+        pred_norm = sliding_window_predict(
+            predictor, source_np, dir_id, patch_size, overlap, device=self.device
+        )
+
+        pred_hu   = invert_ct_to_hu(pred_norm, ct_params)
+        target_hu = invert_ct_to_hu(target_np, ct_params)
+
+        mask_bool = mask_np > 0.5
+        if mask_bool.any():
+            mae_hu = float(np.abs(pred_hu - target_hu)[mask_bool].mean())
+            self._val_mae_hu.append(mae_hu)
+
+    def on_validation_epoch_end(self) -> None:
+        mae_values = getattr(self, "_val_mae_hu", [])
+        mean_mae_hu = float(np.mean(mae_values)) if mae_values else float("nan")
+        self.log(
+            "val/mae_hu", mean_mae_hu,
             on_step=False, on_epoch=True, prog_bar=True, sync_dist=True,
         )
 
