@@ -88,6 +88,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--direction", default="mr_to_ct", choices=["mr_to_ct", "cbct_to_ct"],
                    help="Primary source->CT direction to evaluate + compare vs baselines. "
                         "The reverse (CT->source) direction is always evaluated too.")
+    p.add_argument("--num-steps", type=int, default=10, help="Reverse-sampling steps (overrides NUM_STEPS).")
     return p.parse_args()
 
 
@@ -195,7 +196,9 @@ def gather_patients(
 
 
 def main() -> None:
+    global NUM_STEPS
     args = parse_args()
+    NUM_STEPS = args.num_steps
     cfg = load_config(args.config)
 
     with open(args.manifest_2023) as f:
