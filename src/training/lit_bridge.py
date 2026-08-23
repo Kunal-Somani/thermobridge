@@ -430,11 +430,13 @@ class LitBridge(pl.LightningModule):
         m_t_t = torch.tensor([1], dtype=torch.long, device=dev)
         A = self.router.num_anatomies if self.router is not None else self._num_anatomies
         alpha = torch.full((1,A), 1.0/A, device=dev)
+        # Single-step x0 prediction at t=0.5 — fast, no OOM, meaningful val proxy.
+        t_mid = torch.full((1,), 0.5, device=dev)
+        src_crop_t = torch.from_numpy(src_crop[None,None]).float().to(dev)
+        tgt_crop_t = torch.from_numpy(tgt_crop[None,None]).float().to(dev)
+        x_t, _ = self.bridge.forward_marginal(tgt_crop_t, src_crop_t, t_mid)
         with torch.no_grad():
-            pred_norm = self.bridge.reverse_sample(
-                self.denoiser, src_t, m_s_t, m_t_t, alpha,
-                num_steps=int(self.cfg.model.bridge.num_steps)
-            )[0,0].float().cpu().numpy()
+            pred_norm = self.denoiser(x_t, t_mid, m_s_t, m_t_t, alpha)[0,0].float().cpu().numpy()
         target_np = tgt_crop
 
         pred_hu   = invert_ct_to_hu(pred_norm, ct_params)
