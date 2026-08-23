@@ -79,8 +79,8 @@ def main():
         mask_crop = center_crop(mask, patch)
 
         pred_norm = run_inference(model, mr_crop, device, args.num_steps)
-        pred_hu = invert_ct_to_hu(pred_norm, ct_params)
-        gt_hu = invert_ct_to_hu(ct_crop, ct_params)
+        pred_hu   = invert_ct_to_hu(np.clip(pred_norm, -1, 1), ct_params)
+        gt_hu     = invert_ct_to_hu(ct_crop, ct_params)
         error = np.abs(pred_hu - gt_hu)
         error[mask_crop < 0.5] = 0
 
@@ -97,7 +97,7 @@ def main():
         axes[1].set_title("Ground Truth CT", fontweight='bold')
         axes[1].axis('off')
 
-        axes[2].imshow(pred_hu[z_mid], cmap='gray', vmin=vmin, vmax=vmax)
+        axes[2].imshow(np.clip(pred_hu[z_mid], vmin, vmax), cmap='gray', vmin=vmin, vmax=vmax)
         axes[2].set_title("ThermoBridge Prediction", fontweight='bold')
         axes[2].axis('off')
 
