@@ -1,0 +1,53 @@
+Loading checkpoint (map_location='cpu'): outputs/runs/thermobridge_v4/checkpoints/best_epoch=144_val/loss_patch=0.0516.ckpt
+
+Evaluating 15 patients (<= 5 per anatomy), direction=cbct_to_ct, center-crop (96, 96, 96), num_steps=10.
+
+[1/15] 2ABA005 AB (cbct->ct) MAE=63.66 HU
+[1/15] 2ABA005 AB FAILED: 'p1'
+[2/15] 2ABA006 AB (cbct->ct) MAE=213.69 HU
+[2/15] 2ABA006 AB FAILED: 'p1'
+[3/15] 2ABA009 AB (cbct->ct) MAE=96.28 HU
+[3/15] 2ABA009 AB FAILED: 'p1'
+[4/15] 2ABA031 AB (cbct->ct) MAE=111.95 HU
+[4/15] 2ABA031 AB FAILED: 'p1'
+[5/15] 2ABA032 AB (cbct->ct) MAE=144.55 HU
+[5/15] 2ABA032 AB FAILED: 'p1'
+[6/15] 2HNA005 HN (cbct->ct) MAE=135.72 HU
+[6/15] 2HNA005 HN FAILED: 'p1'
+[7/15] 2HNA011 HN (cbct->ct) MAE=151.89 HU
+[7/15] 2HNA011 HN FAILED: 'p1'
+[8/15] 2HNA016 HN (cbct->ct) MAE=131.65 HU
+[8/15] 2HNA016 HN FAILED: 'p1'
+[9/15] 2HNA019 HN (cbct->ct) MAE=149.69 HU
+[9/15] 2HNA019 HN FAILED: 'p1'
+[10/15] 2HNA025 HN (cbct->ct) MAE=122.53 HU
+[10/15] 2HNA025 HN FAILED: 'p1'
+[11/15] 2THA056 TH (cbct->ct) MAE=108.12 HU
+[11/15] 2THA056 TH FAILED: 'p1'
+[12/15] 2THA084 TH (cbct->ct) MAE=93.34 HU
+[12/15] 2THA084 TH FAILED: 'p1'
+[13/15] 2THA085 TH (cbct->ct) MAE=112.59 HU
+[13/15] 2THA085 TH FAILED: 'p1'
+[14/15] 2THA096 TH (cbct->ct) MAE=103.70 HU
+[14/15] 2THA096 TH FAILED: 'p1'
+[15/15] 2THA101 TH (cbct->ct) MAE=104.25 HU
+[15/15] 2THA101 TH FAILED: 'p1'
+
+========================================================================
+  QUICK EVAL SUMMARY — model_type=thermobridge — cbct_to_ct — center-crop MAE-HU (mean ± std)
+========================================================================
+  AB        MAE-HU =   126.03 ± 50.99   n=5
+  HN        MAE-HU =   138.30 ± 11.08   n=5
+  TH        MAE-HU =   104.40 ± 6.38    n=5
+  --------------------------------------------------------------------
+  ALL       MAE-HU =   122.91 ± 33.43   n=15
+
+  vs. baselines:
+    U-Net baseline    :    88.29 HU
+    mean-CT floor     :   655.00 HU
+    ThermoBridge (here):   122.91 HU
+========================================================================
+
+  CT->source — normalized MAE / PSNR / SSIM (mean ± std)
+  --------------------------------------------------------------------
+

@@ -1,0 +1,77 @@
+Loading checkpoint (map_location='cpu'): outputs/runs/unet_baseline_combined/checkpoints/best_epoch=143_val/mae_hu=97.40.ckpt
+
+Evaluating 48 patients (<= 10 per anatomy), direction=mr_to_ct, center-crop (96, 96, 96), num_steps=10.
+
+[1/48] 1ABA018 AB (mr->ct) MAE=73.23 HU
+[2/48] 1ABA044 AB (mr->ct) MAE=52.80 HU
+[3/48] 1ABA047 AB (mr->ct) MAE=69.81 HU
+[4/48] 1ABA049 AB (mr->ct) MAE=48.64 HU
+[5/48] 1ABA050 AB (mr->ct) MAE=48.08 HU
+[6/48] 1ABA054 AB (mr->ct) MAE=85.46 HU
+[7/48] 1ABA058 AB (mr->ct) MAE=52.62 HU
+[8/48] 1ABA067 AB (mr->ct) MAE=47.23 HU
+[9/48] 1ABA070 AB (mr->ct) MAE=80.39 HU
+[10/48] 1ABA087 AB (mr->ct) MAE=51.29 HU
+[11/48] 1HNA008 HN (mr->ct) MAE=145.62 HU
+[12/48] 1HNA023 HN (mr->ct) MAE=127.18 HU
+[13/48] 1HNA025 HN (mr->ct) MAE=152.48 HU
+[14/48] 1HNA028 HN (mr->ct) MAE=124.53 HU
+[15/48] 1HNA029 HN (mr->ct) MAE=117.28 HU
+[16/48] 1HNA035 HN (mr->ct) MAE=111.77 HU
+[17/48] 1HNA036 HN (mr->ct) MAE=150.80 HU
+[18/48] 1HNA041 HN (mr->ct) MAE=131.37 HU
+[19/48] 1HNA048 HN (mr->ct) MAE=111.54 HU
+[20/48] 1HNA051 HN (mr->ct) MAE=119.81 HU
+[21/48] 1THA004 TH (mr->ct) MAE=102.07 HU
+[22/48] 1THA018 TH (mr->ct) MAE=146.03 HU
+[23/48] 1THA039 TH (mr->ct) MAE=195.41 HU
+[24/48] 1THA041 TH (mr->ct) MAE=171.68 HU
+[25/48] 1THA046 TH (mr->ct) MAE=205.73 HU
+[26/48] 1THA050 TH (mr->ct) MAE=185.46 HU
+[27/48] 1THA212 TH (mr->ct) MAE=117.35 HU
+[28/48] 1THA221 TH (mr->ct) MAE=117.88 HU
+[29/48] 1THA234 TH (mr->ct) MAE=97.90 HU
+[30/48] 1THA243 TH (mr->ct) MAE=102.41 HU
+[31/48] 1BA014 brain (mr->ct) MAE=91.94 HU
+[32/48] 1BA022 brain (mr->ct) MAE=97.59 HU
+[33/48] 1BA082 brain (mr->ct) MAE=103.78 HU
+[34/48] 1BA091 brain (mr->ct) MAE=97.29 HU
+[35/48] 1BA097 brain (mr->ct) MAE=97.97 HU
+[36/48] 1BA105 brain (mr->ct) MAE=118.14 HU
+[37/48] 1BA172 brain (mr->ct) MAE=82.42 HU
+[38/48] 1BA185 brain (mr->ct) MAE=89.16 HU
+[39/48] 1BA220 brain (mr->ct) MAE=83.18 HU
+[40/48] 1BA336 brain (mr->ct) MAE=101.87 HU
+[41/48] 1PA019 pelvis (mr->ct) MAE=105.63 HU
+[42/48] 1PA026 pelvis (mr->ct) MAE=100.10 HU
+[43/48] 1PA038 pelvis (mr->ct) MAE=99.67 HU
+[44/48] 1PA047 pelvis (mr->ct) MAE=73.52 HU
+[45/48] 1PA059 pelvis (mr->ct) MAE=60.03 HU
+[46/48] 1PA090 pelvis (mr->ct) MAE=71.54 HU
+[47/48] 1PA097 pelvis (mr->ct) MAE=74.98 HU
+[48/48] 1PA098 pelvis (mr->ct) MAE=64.15 HU
+
+========================================================================
+  QUICK EVAL SUMMARY — model_type=unet — mr_to_ct — center-crop MAE-HU (mean ± std)
+========================================================================
+  AB        MAE-HU =    60.95 ± 13.94   n=10
+  HN        MAE-HU =   129.24 ± 14.68   n=10
+  TH        MAE-HU =   144.19 ± 39.93   n=10
+  brain     MAE-HU =    96.33 ± 10.02   n=10
+  pelvis    MAE-HU =    81.20 ± 16.68   n=8
+  --------------------------------------------------------------------
+  ALL       MAE-HU =   103.27 ± 37.93   n=48
+
+  vs. baselines:
+    mean-CT floor     :   655.00 HU
+    U-Net (here):   103.27 HU
+========================================================================
+
+  CT->source — normalized MAE / PSNR / SSIM (mean ± std)
+  --------------------------------------------------------------------
+  AB        MAE=849.0630±692.3488  PSNR=  8.17dB  SSIM=0.1004  n=10
+  HN        MAE=120.6533±163.6155  PSNR= 11.65dB  SSIM=0.2208  n=10
+  TH        MAE=205.3704±117.3667  PSNR= 12.45dB  SSIM=0.3076  n=10
+  brain     MAE=257.5229±26.8141  PSNR= 14.40dB  SSIM=0.2447  n=10
+  pelvis    MAE=220.2356±125.3553  PSNR= 13.05dB  SSIM=0.3292  n=8
+
