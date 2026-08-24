@@ -89,7 +89,7 @@ One ThermoBridge replaces 30 U-Nets (201M params total) — **4.5× deployment r
 
 ## Architecture
 
-![Architecture](outputs/figures/architecture.png)
+![Architecture](architecture.png)
 
 The model consists of:
 1. **I2SB Bridge Process** — samples noisy intermediate x_t from source and target
