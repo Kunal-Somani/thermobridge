@@ -232,6 +232,7 @@ python scripts/failure_analysis.py \
 
 ## Project Structure
 
+```text
 thermobridge/
 ├── configs/
 │ ├── default.yaml # All hyperparameters, loss weights
@@ -264,6 +265,7 @@ thermobridge/
 └── outputs/
 ├── figures/ # All paper figures (300 DPI)
 └── runs/ # Training checkpoints and logs
+```
 
 
 ---
