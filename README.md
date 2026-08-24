@@ -1,4 +1,4 @@
-# ThermoBridge 🌉
+# ThermoBridge 
 
 **Universal Any-to-Any 3D Medical Image Synthesis via Physics-Guided Schrödinger Bridge Diffusion**
 
